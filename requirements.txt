@@ -23,3 +23,4 @@ cryptography==43.0.3
 pydantic==2.10.3
 pydantic-settings==2.6.1
 numpy==1.26.4
+python-multipart==0.0.9
