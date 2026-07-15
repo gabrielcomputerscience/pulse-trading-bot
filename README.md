@@ -37,40 +37,38 @@ pulse-trading-bot/
 
 ## Setup
 
-1. **Create a Deriv app** at https://developers.deriv.com (free) — note the App ID.
-2. **Register a Redirect URI** on that app, exactly: `http://localhost:5173/oauth/callback` for local dev (add your real production frontend URL too once you deploy). OAuth login fails with a generic error if this doesn't match exactly.
-3. Copy `.env.example` to `.env` and fill in:
+1. Copy `.env.example` to `.env` and fill in:
    ```
-   DERIV_APP_ID=your_app_id
-   DERIV_REDIRECT_URI=http://localhost:5173/oauth/callback
+   DERIV_LEGACY_APP_ID=1089            # public shared app id, works for the legacy WS API — no registration needed
    DERIV_ACCOUNT_MODE=demo             # demo | real  (starts on demo, always)
    DATABASE_URL=sqlite:///./pulse.db
    SECRET_KEY=generate_a_random_string
    TOKEN_ENCRYPTION_KEY=generate_a_fernet_key
    ```
-4. Install dependencies:
+2. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-5. Run the API:
+3. Run the API:
    ```bash
    uvicorn app.main:app --reload
    ```
-6. API docs at `http://localhost:8000/docs`.
+4. API docs at `http://localhost:8000/docs`.
+
+**A note on Deriv's OAuth 2.0:** this app originally used Deriv's "Continue with Deriv" OAuth flow for login. It turned out Deriv currently runs two separate, incompatible API systems — a newer REST + WebSocket "Options" API (what OAuth access tokens are for) and the older WebSocket trading API this backend is built on (what Deriv's own docs label "Options Trading (Legacy)"). OAuth tokens aren't accepted by the legacy API's `authorize` command, so login here uses a **Personal Access Token (PAT)** instead — still a fully supported, Deriv-endorsed auth method, just pasted rather than obtained via redirect. The OAuth code (`app/deriv_oauth.py`, `/auth/deriv/login`, `/auth/deriv/callback`) is still in the repo, functional for the token exchange itself, but not wired into the login screen — worth revisiting if this backend is ever migrated to Deriv's newer REST+WS API.
 
 ## Using it
 
-There's no separate account to create — logging in *is* connecting your Deriv account.
+There's no separate account to create — logging in *is* connecting your Deriv account, just via a pasted token instead of a redirect.
 
-1. **"Continue with Deriv"** in the frontend redirects to Deriv's own login/approval page. Approve access, and Deriv redirects back with your account(s) — usually a demo and a real account, each with their own scoped token. Pulse never sees your Deriv password, and you never see or paste a raw token.
-2. The backend exchanges that for its own session token (`POST /auth/deriv/callback`) and creates or finds your local `User` row keyed by your Deriv login ID — no username/password anywhere.
-3. **Balances** (`GET /account/balances`) are pulled live from Deriv every time they're requested — not cached, not stored numbers.
-4. **Create a bot** (`POST /bots`): pick a strategy (`mean_reversion`, `trend_following`, `candlestick_indicator`, or `martingale`), an asset (e.g. `R_100`, `1HZ100V`, `BOOM1000`), stake, and risk limits.
-5. **Backtest first** (`POST /bots/{id}/backtest` or the free-form `POST /backtest`): pulls real historical ticks from Deriv, replays the strategy, returns actual win rate, drawdown, and trade count. **Do this before starting the bot live.**
-6. **Start the bot** (`POST /bots/{id}/start`): runs on your **demo balance** by default, using the demo token Deriv gave you at login. Every new bot spends its first 24h in forced demo mode — hardcoded, not a suggestion.
-7. **Switching to real money** requires an explicit `confirm_real_money=true` flag *after* the 24h demo window, `DERIV_ACCOUNT_MODE=real` in your env, and a real account token to actually exist (i.e. you approved a real account during login).
-
-**Manual-token fallback:** `/auth/signup`, `/auth/login`, and `/auth/deriv-token` still exist (visible in `/docs`) for testing without going through OAuth, but the frontend no longer shows this path — Deriv OAuth is the only flow a real visitor sees.
+1. **Generate a Personal Access Token**: Deriv → Settings → API Token, scoped to **Read + Trade** only (leave out Payments/Withdraw). Paste it on Pulse's login screen.
+2. The backend authorizes with that token over Deriv's WebSocket API to discover which account it belongs to (demo or real, by the `is_virtual` flag Deriv returns), then creates or finds your local `User` row keyed by your Deriv login ID and issues a session token — no username/password anywhere.
+3. **Have both a demo and a real account?** Log in with one token, then use **"+ Link another account"** in the sidebar to add the other — it has to belong to the same Deriv login.
+4. **Balances** (`GET /account/balances`) are pulled live from Deriv every time they're requested — not cached, not stored numbers.
+5. **Create a bot** (`POST /bots`): pick a strategy (`mean_reversion`, `trend_following`, `candlestick_indicator`, or `martingale`), an asset (e.g. `R_100`, `1HZ100V`, `BOOM1000`), stake, and risk limits.
+6. **Backtest first** (`POST /bots/{id}/backtest` or the free-form `POST /backtest`): pulls real historical ticks from Deriv, replays the strategy, returns actual win rate, drawdown, and trade count. **Do this before starting the bot live.**
+7. **Start the bot** (`POST /bots/{id}/start`): runs on your **demo balance** by default, using your linked demo token. Every new bot spends its first 24h in forced demo mode — hardcoded, not a suggestion.
+8. **Switching to real money** requires an explicit `confirm_real_money=true` flag *after* the 24h demo window, `DERIV_ACCOUNT_MODE=real` in your env, and a real account token to actually be linked.
 
 ## The 4 strategies, honestly described
 
@@ -86,10 +84,10 @@ None of these get a manufactured "accuracy %" claim in the code. `backtest.py` c
 ## Frontend
 
 `frontend/` is a real React app (Vite) that talks to this API. Login is a
-single **"Continue with Deriv"** button — no signup form, no password, no
-manual token paste. After approving on Deriv's site, the frontend shows
-your real Overview stats, a live ticker of Deriv synthetic indices, real
-demo/real balances pulled straight from Deriv, My Bots, Bot Builder, and
+single token-paste screen — generate a Personal Access Token on Deriv,
+paste it in, done. The frontend shows your real Overview stats, a live
+ticker of Deriv synthetic indices, real demo/real balances pulled straight
+from Deriv, My Bots, Bot Builder, and
 Backtest Lab.
 
 **Run it locally:**

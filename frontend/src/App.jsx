@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import DerivLogin from './components/DerivLogin.jsx'
-import OAuthCallback from './components/OAuthCallback.jsx'
+import DerivPatLogin from './components/DerivPatLogin.jsx'
+import AddAccountModal from './components/AddAccountModal.jsx'
 import Ticker from './components/Ticker.jsx'
 import AccountBalances from './components/AccountBalances.jsx'
 import OverviewPage from './components/OverviewPage.jsx'
@@ -19,41 +19,34 @@ const VIEWS = {
 }
 
 export default function App() {
-  // screen: 'login' | 'oauth-callback' | 'app'
-  const [screen, setScreen] = useState(() =>
-    window.location.pathname === '/oauth/callback' ? 'oauth-callback' : 'login'
-  )
+  const [screen, setScreen] = useState('login') // login | app
   const [derivLoginid, setDerivLoginid] = useState('')
   const [view, setView] = useState('overview')
   const [refreshKey, setRefreshKey] = useState(0)
   const [backtestBot, setBacktestBot] = useState(null)
   const [tradesBot, setTradesBot] = useState(null)
+  const [showAddAccount, setShowAddAccount] = useState(false)
+  const [balancesKey, setBalancesKey] = useState(0)
 
   useEffect(() => {
-    if (screen === 'oauth-callback') return
     const token = loadStoredToken()
     if (token) setScreen('app')
   }, [])
 
   function handleLogout() {
     setAuthToken(null)
-    window.history.replaceState({}, '', '/')
     setScreen('login')
   }
 
-  if (screen === 'oauth-callback') {
+  if (screen === 'login') {
     return (
-      <OAuthCallback
-        onDone={(res) => {
+      <DerivPatLogin
+        onLoggedIn={(res) => {
           setDerivLoginid(res.deriv_loginid)
           setScreen('app')
         }}
       />
     )
-  }
-
-  if (screen === 'login') {
-    return <DerivLogin />
   }
 
   return (
@@ -71,7 +64,10 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <AccountBalances />
+          <AccountBalances key={balancesKey} />
+          <button className="btn btn-ghost" onClick={() => setShowAddAccount(true)} style={{ width: '100%', marginBottom: 8 }}>
+            + Link another account
+          </button>
           {derivLoginid && <div className="user">{derivLoginid}</div>}
           <button className="btn btn-ghost" onClick={handleLogout} style={{ width: '100%' }}>
             Sign out
@@ -104,6 +100,12 @@ export default function App() {
 
       {backtestBot && <BacktestModal bot={backtestBot} onClose={() => setBacktestBot(null)} />}
       {tradesBot && <TradesModal bot={tradesBot} onClose={() => setTradesBot(null)} />}
+      {showAddAccount && (
+        <AddAccountModal
+          onClose={() => setShowAddAccount(false)}
+          onLinked={() => setBalancesKey((k) => k + 1)}
+        />
+      )}
     </div>
   )
 }

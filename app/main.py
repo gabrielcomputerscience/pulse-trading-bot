@@ -47,7 +47,106 @@ def on_startup():
 
 
 # ---------------------------------------------------------------------------
-# Auth — Deriv OAuth (primary login: "Continue with Deriv")
+# Auth — Personal Access Token login (primary flow)
+#
+# Deriv currently runs two separate, incompatible API systems: a newer
+# REST + WebSocket "Options" API (what OAuth 2.0 access tokens are for),
+# and the older WebSocket trading API that this whole backend is built on
+# (what Deriv's own docs now label "Options Trading (Legacy)"). OAuth
+# access tokens are not accepted by the legacy `authorize` command — they're
+# a different token system entirely. Personal Access Tokens (PATs), which
+# users generate themselves in Deriv's dashboard, DO work with the legacy
+# API, so that's what this app uses for login. No password, no separate
+# signup — same as before, just a pasted token instead of an OAuth redirect.
+# ---------------------------------------------------------------------------
+
+async def _discover_and_upsert_deriv_user(db: Session, token: str) -> tuple[User, dict]:
+    """Authorizes over the (legacy) WebSocket API with the given token to
+    discover which Deriv account it belongs to, then creates or updates the
+    matching local User row. Shared by the PAT login endpoint below."""
+    client = DerivClient(api_token=token)
+    try:
+        await client.connect()
+        info = client.account_info
+    except Exception as e:
+        raise HTTPException(400, f"Deriv rejected that token: {e}")
+    finally:
+        await client.close()
+
+    loginid = info.get("loginid")
+    if not loginid:
+        raise HTTPException(400, "Deriv accepted the token but returned no account info.")
+    is_virtual = bool(info.get("is_virtual"))
+    currency = info.get("currency", "USD")
+
+    user = (db.query(User)
+            .filter((User.deriv_loginid == loginid)
+                    | (User.deriv_demo_loginid == loginid)
+                    | (User.deriv_real_loginid == loginid))
+            .first())
+    if not user:
+        user = User(deriv_loginid=loginid)
+        db.add(user)
+
+    user.deriv_currency = currency
+    if is_virtual:
+        user.deriv_demo_loginid = loginid
+        user.deriv_demo_token_encrypted = encrypt_token(token)
+    else:
+        user.deriv_real_loginid = loginid
+        user.deriv_real_token_encrypted = encrypt_token(token)
+        if not user.deriv_loginid:
+            user.deriv_loginid = loginid
+
+    db.commit()
+    db.refresh(user)
+    return user, info
+
+
+class DerivPatLoginRequest(BaseModel):
+    token: str
+
+
+@app.post("/auth/deriv-pat")
+async def deriv_pat_login(req: DerivPatLoginRequest, db: Session = Depends(get_db)):
+    """Log in (or link an additional account) using a Deriv Personal Access
+    Token. Generate one at Deriv → Settings → API Token, scoped to Read +
+    Trade only — paste it here directly, it's encrypted at rest and never
+    logged or returned in any response after this."""
+    user, info = await _discover_and_upsert_deriv_user(db, req.token)
+    return {
+        "access_token": create_access_token_for_user(user),
+        "token_type": "bearer",
+        "deriv_loginid": user.deriv_loginid,
+        "has_demo": bool(user.deriv_demo_token_encrypted),
+        "has_real": bool(user.deriv_real_token_encrypted),
+        "connected_account_is_demo": bool(info.get("is_virtual")),
+    }
+
+
+@app.post("/auth/deriv-pat/add")
+async def deriv_pat_add_account(req: DerivPatLoginRequest, user: User = Depends(get_current_user),
+                                 db: Session = Depends(get_db)):
+    """Link a second account (e.g. add a real-money token when you first
+    logged in with only a demo token) to the currently signed-in user."""
+    updated_user, info = await _discover_and_upsert_deriv_user(db, req.token)
+    if updated_user.id != user.id:
+        raise HTTPException(
+            400,
+            "That token belongs to a different Deriv login than the one you're signed in as."
+        )
+    return {
+        "has_demo": bool(updated_user.deriv_demo_token_encrypted),
+        "has_real": bool(updated_user.deriv_real_token_encrypted),
+        "connected_account_is_demo": bool(info.get("is_virtual")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Auth — Deriv OAuth (kept, but NOT wired to trading — see note above).
+# The token this produces is only verified to work for the exchange itself;
+# it is not usable with the legacy WebSocket API the rest of this backend
+# relies on. Left here in case a future REST+WS migration revisits this.
 # ---------------------------------------------------------------------------
 
 @app.get("/auth/deriv/login")
@@ -65,62 +164,24 @@ class DerivCallbackRequest(BaseModel):
 
 @app.post("/auth/deriv/callback")
 async def deriv_callback(req: DerivCallbackRequest, db: Session = Depends(get_db)):
-    """Exchanges the authorization code Deriv sent back for an access
-    token, then authorizes over the existing WebSocket API to discover
-    which account (demo or real) that token represents — reusing the same
-    DerivClient the rest of the app already uses, no separate REST client
-    needed."""
+    """NOTE: functional for the OAuth exchange itself, but the resulting
+    access_token is not currently usable for trading (see module note
+    above) — not used by the frontend's primary login flow."""
     try:
         token_data = await exchange_code_for_token(req.code, req.state)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
     access_token = token_data["access_token"]
-
-    client = DerivClient(api_token=access_token)
-    try:
-        await client.connect()
-        info = client.account_info
-    except Exception as e:
-        raise HTTPException(400, f"Deriv issued a token but authorizing with it failed: {e}")
-    finally:
-        await client.close()
-
-    loginid = info.get("loginid")
-    if not loginid:
-        raise HTTPException(400, "Deriv authorized the token but returned no account info.")
-    is_virtual = bool(info.get("is_virtual"))
-    currency = info.get("currency", "USD")
-
-    user = (db.query(User)
-            .filter((User.deriv_loginid == loginid)
-                    | (User.deriv_demo_loginid == loginid)
-                    | (User.deriv_real_loginid == loginid))
-            .first())
-    if not user:
-        user = User(deriv_loginid=loginid)
-        db.add(user)
-
-    user.deriv_currency = currency
-    if is_virtual:
-        user.deriv_demo_loginid = loginid
-        user.deriv_demo_token_encrypted = encrypt_token(access_token)
-    else:
-        user.deriv_real_loginid = loginid
-        user.deriv_real_token_encrypted = encrypt_token(access_token)
-        if not user.deriv_loginid:
-            user.deriv_loginid = loginid
-
-    db.commit()
-    db.refresh(user)
+    user, info = await _discover_and_upsert_deriv_user(db, access_token)
 
     return {
         "access_token": create_access_token_for_user(user),
         "token_type": "bearer",
-        "deriv_loginid": user.deriv_loginid or loginid,
+        "deriv_loginid": user.deriv_loginid,
         "has_demo": bool(user.deriv_demo_token_encrypted),
         "has_real": bool(user.deriv_real_token_encrypted),
-        "connected_account_is_demo": is_virtual,
+        "connected_account_is_demo": bool(info.get("is_virtual")),
     }
 
 

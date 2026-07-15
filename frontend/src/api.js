@@ -38,10 +38,19 @@ async function request(path, { method = 'GET', body, form = false } = {}) {
 }
 
 export const api = {
+  // Primary login flow — Personal Access Token, works with the legacy
+  // WebSocket trading API this app is built on.
+  derivPatLogin: (token) => request('/auth/deriv-pat', { method: 'POST', body: { token } }),
+  derivPatAddAccount: (token) => request('/auth/deriv-pat/add', { method: 'POST', body: { token } }),
+  accountBalances: () => request('/account/balances'),
+
+  // OAuth — implemented and functional for the exchange itself, but not
+  // currently wired into the login screen: Deriv's OAuth access tokens
+  // aren't accepted by the legacy trading API. Kept for a possible future
+  // migration to Deriv's newer REST+WS API.
   derivLoginUrl: () => request('/auth/deriv/login'),
   derivCallback: (code, state) =>
     request('/auth/deriv/callback', { method: 'POST', body: { code, state } }),
-  accountBalances: () => request('/account/balances'),
 
   // Legacy manual-signup path — kept for /docs testing, not used by the UI.
   signup: (username, password) =>
