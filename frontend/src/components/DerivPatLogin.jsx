@@ -11,7 +11,7 @@ export default function DerivPatLogin({ onLoggedIn }) {
     setError('')
     setLoading(true)
     try {
-      const res = await api.derivPatLogin(token)
+      const res = await api.derivPatLogin(token.trim())
       setAuthToken(res.access_token)
       setToken('')
       onLoggedIn(res)
