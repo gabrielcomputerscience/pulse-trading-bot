@@ -1,75 +1,112 @@
 """
-Deriv OAuth2 login flow.
+Deriv OAuth 2.0 — Authorization Code flow with PKCE.
 
-Flow:
-  1. Frontend sends the user's browser to the URL from build_authorize_url().
-  2. User logs in on Deriv's own site and approves your app.
-  3. Deriv redirects the browser back to DERIV_REDIRECT_URI with query
-     params describing every account the user approved access to, e.g.:
-       ?acct1=CR900000&token1=a1-xxxx&cur1=USD
-        &acct2=VRTC900000&token2=a1-yyyy&cur2=USD
-     (One pair per account; count varies by user — could be just a demo,
-     could be several real accounts across currencies.)
-  4. Frontend hands that raw query string to POST /auth/deriv/callback,
-     which is what parse_callback_accounts() below is for.
+This replaces an earlier implementation built against Deriv's older
+implicit-style flow (oauth.deriv.com/oauth2/authorize returning acct#/token#
+pairs directly), which Deriv has since retired. Current spec, per
+https://developers.deriv.com/docs/intro/oauth:
 
-NOTE: this is implemented against Deriv's documented OAuth2 contract. If
-Deriv has changed parameter names since, parse_callback_accounts() is the
-one place to adjust — it's deliberately tolerant (regex over acct/token/cur
-prefixes) rather than hardcoding an exact account count.
+  1. Generate a PKCE code_verifier + code_challenge (SHA256) and a random
+     state, and hold onto the verifier until the token exchange.
+  2. Redirect the user to https://auth.deriv.com/oauth2/auth with those
+     values plus response_type=code, client_id, redirect_uri, scope.
+  3. User logs in / consents on Deriv's own site.
+  4. Deriv redirects back to redirect_uri with ?code=...&state=...
+  5. Backend exchanges the code (+ original code_verifier) for an
+     access_token at https://auth.deriv.com/oauth2/token.
+  6. That access_token is usable as a Bearer token for both REST calls and
+     as the token passed to the existing WebSocket `authorize` request —
+     so the rest of this codebase (DerivClient, bot_engine, backtest) needs
+     no changes, only how the token is obtained changes.
+
+PKCE is generated and held server-side here (rather than in the browser via
+sessionStorage, which is what Deriv's own docs example shows) — the
+verifier never needs to leave the backend, which is simpler for this
+architecture and equally secure. State is stored alongside it and used to
+correlate the callback back to the right verifier.
+
+NOTE: implemented against the documented spec pulled July 2026. If Deriv's
+endpoints or parameter names change again, this is the one file to check.
 """
-import re
-from dataclasses import dataclass
-from urllib.parse import parse_qs, urlencode
+import base64
+import hashlib
+import secrets as _secrets
+import time
+from urllib.parse import urlencode
+
+import httpx
 
 from app.config import settings
 
+AUTH_URL = "https://auth.deriv.com/oauth2/auth"
+TOKEN_URL = "https://auth.deriv.com/oauth2/token"
 
-@dataclass
-class DerivAccount:
-    loginid: str
-    token: str
-    currency: str
+# Short-lived server-side store for PKCE verifiers, keyed by state.
+# In-memory is fine for a single backend instance; move to Redis/DB if you
+# ever run more than one instance behind a load balancer.
+_pending_logins: dict[str, dict] = {}
+_PENDING_TTL_SECONDS = 600
 
-    @property
-    def is_demo(self) -> bool:
-        # Deriv's demo/virtual accounts use these loginid prefixes.
-        return self.loginid.upper().startswith(("VRTC", "VRW"))
+
+def _cleanup_expired():
+    now = time.time()
+    expired = [k for k, v in _pending_logins.items() if now - v["created_at"] > _PENDING_TTL_SECONDS]
+    for k in expired:
+        _pending_logins.pop(k, None)
+
+
+def _generate_pkce_pair() -> tuple[str, str]:
+    """Returns (code_verifier, code_challenge)."""
+    code_verifier = base64.urlsafe_b64encode(_secrets.token_bytes(64)).rstrip(b"=").decode()
+    challenge_bytes = hashlib.sha256(code_verifier.encode()).digest()
+    code_challenge = base64.urlsafe_b64encode(challenge_bytes).rstrip(b"=").decode()
+    return code_verifier, code_challenge
 
 
 def build_authorize_url() -> str:
+    """Generates fresh PKCE + state, stores the verifier server-side keyed
+    by state, and returns the URL the frontend should redirect the browser
+    to."""
+    _cleanup_expired()
+
+    code_verifier, code_challenge = _generate_pkce_pair()
+    state = _secrets.token_hex(16)
+    _pending_logins[state] = {"code_verifier": code_verifier, "created_at": time.time()}
+
     params = {
-        "app_id": settings.deriv_app_id,
-        "l": "en",
+        "response_type": "code",
+        "client_id": settings.deriv_app_id,
         "redirect_uri": settings.deriv_redirect_uri,
+        "scope": "trade account_manage",
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
     }
-    return f"{settings.deriv_oauth_url}?{urlencode(params)}"
+    return f"{AUTH_URL}?{urlencode(params)}"
 
 
-def parse_callback_accounts(query_string: str) -> list[DerivAccount]:
-    """query_string is everything after the '?' in the callback URL, e.g.
-    'acct1=CR900000&token1=a1-xxxx&cur1=USD&acct2=VRTC900000&token2=...'."""
-    params = parse_qs(query_string.lstrip("?"))
-    flat = {k: v[0] for k, v in params.items() if v}
+async def exchange_code_for_token(code: str, state: str) -> dict:
+    """Looks up the stored code_verifier by state and exchanges the
+    authorization code for an access token. Raises ValueError on any
+    failure (unknown state, expired, or Deriv rejecting the exchange)."""
+    _cleanup_expired()
+    pending = _pending_logins.pop(state, None)
+    if not pending:
+        raise ValueError("Login session expired or already used — try Continue with Deriv again.")
 
-    indices = sorted({
-        int(m.group(1))
-        for key in flat
-        if (m := re.match(r"^acct(\d+)$", key))
-    })
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(TOKEN_URL, data={
+            "grant_type": "authorization_code",
+            "client_id": settings.deriv_app_id,
+            "code": code,
+            "code_verifier": pending["code_verifier"],
+            "redirect_uri": settings.deriv_redirect_uri,
+        })
 
-    accounts = []
-    for i in indices:
-        loginid = flat.get(f"acct{i}")
-        token = flat.get(f"token{i}")
-        currency = flat.get(f"cur{i}", "USD")
-        if loginid and token:
-            accounts.append(DerivAccount(loginid=loginid, token=token, currency=currency))
-    return accounts
+    if resp.status_code != 200:
+        raise ValueError(f"Deriv token exchange failed ({resp.status_code}): {resp.text}")
 
-
-def pick_primary_accounts(accounts: list[DerivAccount]) -> tuple[DerivAccount | None, DerivAccount | None]:
-    """Returns (demo_account, real_account) — first of each kind found."""
-    demo = next((a for a in accounts if a.is_demo), None)
-    real = next((a for a in accounts if not a.is_demo), None)
-    return demo, real
+    data = resp.json()
+    if "access_token" not in data:
+        raise ValueError(f"Deriv token exchange returned no access_token: {data}")
+    return data

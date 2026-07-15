@@ -113,14 +113,63 @@ npm run build
 Outputs static files to `frontend/dist/` — deploy that folder to any static
 host (see below).
 
-## Deployment (basic)
+## Deployment — step by step (Railway backend + Vercel frontend)
 
-- Any host that runs Python 3.11+ works: a small VPS (DigitalOcean/Linode), Railway, Render, or Fly.io.
-- Use a process manager (`systemd`, `supervisor`, or the platform's built-in one) to keep `uvicorn` running and auto-restart.
-- Put `DATABASE_URL` on Postgres for anything beyond solo/testing use (SQLite is fine for development).
-- Terminate TLS (HTTPS) at your reverse proxy (Caddy/Nginx) or platform edge — never run this over plain HTTP once it has real credentials attached.
-- Set real environment variables in your host's secrets manager — do not commit `.env`.
-- **Frontend:** `npm run build` in `frontend/`, then deploy the `dist/` folder to Vercel, Netlify, Cloudflare Pages, or as static files served by your reverse proxy alongside the API. Set `VITE_API_URL` at build time to your live backend URL, and add that frontend's real domain to `allow_origins` in `app/main.py`. Since `/oauth/callback` is a client-side route (not a real file), make sure your static host falls back to `index.html` for unknown paths (Vercel/Netlify/Cloudflare Pages do this by default for SPAs; if you serve it yourself via Nginx, add a `try_files $uri /index.html;` fallback). Also update `DERIV_REDIRECT_URI` in the backend `.env` and the matching Redirect URI in your Deriv app settings to your real production URL.
+This is the fastest path to a real HTTPS URL, which you need anyway since
+Deriv rejects `localhost` redirect URIs. Any similar pair of hosts works
+the same way (Render/Fly.io instead of Railway, Netlify/Cloudflare Pages
+instead of Vercel) — the steps below are illustrative.
+
+**1. Push this project to a GitHub repo** (both `app/` and `frontend/` in
+the same repo is fine). Make sure `.env` and `frontend/.env` are **not**
+committed — check `.gitignore` already excludes them.
+
+**2. Deploy the backend (Railway):**
+   - New Project → Deploy from GitHub repo → select this repo
+   - Root directory: leave at repo root (it'll find `requirements.txt`)
+   - Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - Add a Postgres database from Railway's "+ New" menu, and copy its
+     connection string into `DATABASE_URL`
+   - Set these environment variables in Railway's dashboard:
+     ```
+     DERIV_APP_ID=your_app_id
+     DERIV_ACCOUNT_MODE=demo
+     DATABASE_URL=<railway's postgres url>
+     SECRET_KEY=<generate: python -c "import secrets; print(secrets.token_urlsafe(32))">
+     TOKEN_ENCRYPTION_KEY=<generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
+     ALLOWED_ORIGINS=<fill in after step 3, once you know the Vercel URL>
+     DERIV_REDIRECT_URI=<fill in after step 3, once you know the Vercel URL>
+     ```
+   - Deploy. Railway gives you a URL like `https://pulse-backend-production.up.railway.app` — that's your backend's live URL.
+
+**3. Deploy the frontend (Vercel):**
+   - New Project → import the same GitHub repo
+   - Root directory: `frontend`
+   - Build command: `npm run build`, output directory: `dist` (Vercel usually detects this automatically for Vite)
+   - Environment variable: `VITE_API_URL=https://pulse-backend-production.up.railway.app` (your Railway URL from step 2)
+   - Deploy. Vercel gives you a URL like `https://pulse-console.vercel.app`.
+
+**4. Wire the two together:** go back to Railway and set:
+   ```
+   ALLOWED_ORIGINS=https://pulse-console.vercel.app
+   DERIV_REDIRECT_URI=https://pulse-console.vercel.app/oauth/callback
+   ```
+   Redeploy the backend for these to take effect.
+
+**5. Register the redirect URL with Deriv:** in your app's settings at
+https://developers.deriv.com, add this exact Redirect URL:
+   ```
+   https://pulse-console.vercel.app/oauth/callback
+   ```
+
+**6. Test it:** open `https://pulse-console.vercel.app`, click "Continue
+with Deriv," approve access, and you should land back in the app with your
+real Overview and live balances.
+
+**Ongoing notes:**
+- Vercel/Netlify already fall back to `index.html` for unknown client-side routes like `/oauth/callback`, so no extra config needed there.
+- Every time you change the frontend's domain (custom domain, etc.), update both `ALLOWED_ORIGINS` in Railway and the Redirect URL in Deriv's dashboard to match — they have to be exact.
+- Terminate TLS is handled automatically by both Railway and Vercel — you don't need to set up your own HTTPS certs for this setup.
 
 ## Critical safety disclaimers
 

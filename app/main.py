@@ -21,15 +21,15 @@ from app.bot_engine import BotManager
 from app.config import settings
 from app.database import Bot, SessionLocal, Trade, User, decrypt_token, encrypt_token, get_db, init_db
 from app.deriv_client import DerivClient
-from app.deriv_oauth import build_authorize_url, parse_callback_accounts, pick_primary_accounts
+from app.deriv_oauth import build_authorize_url, exchange_code_for_token
 from app.market_data import fetch_ticker
 from app.strategies import RECOMMENDED_STRATEGIES, STRATEGY_REGISTRY
 
 app = FastAPI(title="Pulse Trading Platform API")
 
 # Allow the local Vite dev server (and any origin you deploy the frontend to)
-# to call this API. Set ALLOWED_ORIGINS in your env — no code edit needed
-# per deploy.
+# to call this API. Tighten allow_origins to your real frontend domain(s)
+# before hosting this for anyone but yourself.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list,
@@ -59,36 +59,57 @@ def deriv_login_url():
 
 
 class DerivCallbackRequest(BaseModel):
-    query_string: str  # everything after '?' on the redirect_uri Deriv sent the browser to
+    code: str
+    state: str
 
 
 @app.post("/auth/deriv/callback")
-def deriv_callback(req: DerivCallbackRequest, db: Session = Depends(get_db)):
-    """Exchanges the accounts/tokens Deriv attached to the OAuth redirect
-    for our own session JWT. No password, no separate signup — the Deriv
-    account itself *is* the account here."""
-    accounts = parse_callback_accounts(req.query_string)
-    if not accounts:
-        raise HTTPException(400, "No Deriv accounts found in callback — check DERIV_REDIRECT_URI matches "
-                                  "what's registered at developers.deriv.com.")
+async def deriv_callback(req: DerivCallbackRequest, db: Session = Depends(get_db)):
+    """Exchanges the authorization code Deriv sent back for an access
+    token, then authorizes over the existing WebSocket API to discover
+    which account (demo or real) that token represents — reusing the same
+    DerivClient the rest of the app already uses, no separate REST client
+    needed."""
+    try:
+        token_data = await exchange_code_for_token(req.code, req.state)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
-    demo, real = pick_primary_accounts(accounts)
-    primary = real or demo  # prefer identifying the user by their real account if they have one
-    if not primary:
-        raise HTTPException(400, "Deriv didn't return a usable account.")
+    access_token = token_data["access_token"]
 
-    user = db.query(User).filter(User.deriv_loginid == primary.loginid).first()
+    client = DerivClient(api_token=access_token)
+    try:
+        await client.connect()
+        info = client.account_info
+    except Exception as e:
+        raise HTTPException(400, f"Deriv issued a token but authorizing with it failed: {e}")
+    finally:
+        await client.close()
+
+    loginid = info.get("loginid")
+    if not loginid:
+        raise HTTPException(400, "Deriv authorized the token but returned no account info.")
+    is_virtual = bool(info.get("is_virtual"))
+    currency = info.get("currency", "USD")
+
+    user = (db.query(User)
+            .filter((User.deriv_loginid == loginid)
+                    | (User.deriv_demo_loginid == loginid)
+                    | (User.deriv_real_loginid == loginid))
+            .first())
     if not user:
-        user = User(deriv_loginid=primary.loginid)
+        user = User(deriv_loginid=loginid)
         db.add(user)
 
-    user.deriv_currency = primary.currency
-    if demo:
-        user.deriv_demo_loginid = demo.loginid
-        user.deriv_demo_token_encrypted = encrypt_token(demo.token)
-    if real:
-        user.deriv_real_loginid = real.loginid
-        user.deriv_real_token_encrypted = encrypt_token(real.token)
+    user.deriv_currency = currency
+    if is_virtual:
+        user.deriv_demo_loginid = loginid
+        user.deriv_demo_token_encrypted = encrypt_token(access_token)
+    else:
+        user.deriv_real_loginid = loginid
+        user.deriv_real_token_encrypted = encrypt_token(access_token)
+        if not user.deriv_loginid:
+            user.deriv_loginid = loginid
 
     db.commit()
     db.refresh(user)
@@ -96,9 +117,10 @@ def deriv_callback(req: DerivCallbackRequest, db: Session = Depends(get_db)):
     return {
         "access_token": create_access_token_for_user(user),
         "token_type": "bearer",
-        "deriv_loginid": user.deriv_loginid,
+        "deriv_loginid": user.deriv_loginid or loginid,
         "has_demo": bool(user.deriv_demo_token_encrypted),
         "has_real": bool(user.deriv_real_token_encrypted),
+        "connected_account_is_demo": is_virtual,
     }
 
 

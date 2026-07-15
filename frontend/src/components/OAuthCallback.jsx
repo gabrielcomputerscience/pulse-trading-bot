@@ -1,21 +1,30 @@
 import React, { useEffect, useState } from 'react'
-import { api } from '../api.js'
-import { setAuthToken } from '../api.js'
+import { api, setAuthToken } from '../api.js'
 
 export default function OAuthCallback({ onDone }) {
   const [error, setError] = useState('')
 
   useEffect(() => {
     async function exchange() {
-      const queryString = window.location.search.replace(/^\?/, '')
-      if (!queryString) {
-        setError('No account data came back from Deriv. Try Continue with Deriv again.')
+      const params = new URLSearchParams(window.location.search)
+      const errorParam = params.get('error')
+      if (errorParam) {
+        const description = params.get('error_description') || errorParam
+        setError(`Deriv login was not completed: ${description}`)
         return
       }
+
+      const code = params.get('code')
+      const state = params.get('state')
+      if (!code || !state) {
+        setError('No authorization code came back from Deriv. Try Continue with Deriv again.')
+        return
+      }
+
       try {
-        const res = await api.derivCallback(queryString)
+        const res = await api.derivCallback(code, state)
         setAuthToken(res.access_token)
-        // Clean the token/account params out of the URL bar before moving on.
+        // Clean the code/state params out of the URL bar before moving on.
         window.history.replaceState({}, '', '/')
         onDone(res)
       } catch (err) {

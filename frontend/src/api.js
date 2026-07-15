@@ -39,8 +39,8 @@ async function request(path, { method = 'GET', body, form = false } = {}) {
 
 export const api = {
   derivLoginUrl: () => request('/auth/deriv/login'),
-  derivCallback: (queryString) =>
-    request('/auth/deriv/callback', { method: 'POST', body: { query_string: queryString } }),
+  derivCallback: (code, state) =>
+    request('/auth/deriv/callback', { method: 'POST', body: { code, state } }),
   accountBalances: () => request('/account/balances'),
 
   // Legacy manual-signup path — kept for /docs testing, not used by the UI.
