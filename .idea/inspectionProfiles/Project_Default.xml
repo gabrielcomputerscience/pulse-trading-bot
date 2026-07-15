@@ -1,0 +1,31 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="fastapi" />
+          <option value="uvicorn" />
+          <option value="sqlalchemy" />
+          <option value="pymysql" />
+          <option value="python-dotenv" />
+          <option value="pydantic" />
+          <option value="pydantic-settings" />
+          <option value="email-validator" />
+          <option value="python-jose" />
+          <option value="python-multipart" />
+          <option value="openai" />
+          <option value="langchain" />
+          <option value="langchain-community" />
+          <option value="chromadb" />
+          <option value="requests" />
+          <option value="httpx" />
+          <option value="pandas" />
+          <option value="numpy" />
+          <option value="scikit-learn" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="RestRoleInspection" enabled="true" level="WARNING" enabled_by_default="true" />
+  </profile>
+</component>

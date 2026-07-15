@@ -1,0 +1,31 @@
+"""
+Centralized settings. Everything sensitive comes from the environment —
+nothing here is ever hardcoded, and nothing here should ever be logged.
+"""
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    deriv_app_id: str = "1089"
+    deriv_api_token: str = ""
+    deriv_account_mode: str = "demo"  # "demo" | "real"
+    deriv_ws_url: str = "wss://ws.derivws.com/websockets/v3"
+    deriv_oauth_url: str = "https://oauth.deriv.com/oauth2/authorize"
+    # Must exactly match a Redirect URI registered for this app at
+    # https://developers.deriv.com — Deriv rejects the OAuth flow otherwise.
+    deriv_redirect_uri: str = "http://localhost:5173/oauth/callback"
+
+    database_url: str = "sqlite:///./pulse.db"
+    secret_key: str = "changeme"
+    token_encryption_key: str = ""
+
+    # Safety rails — deliberately hardcoded, not env-overridable, so a bot
+    # can't accidentally skip the forced demo period via config.
+    forced_demo_hours: int = 24
+    martingale_max_doublings: int = 4
+    martingale_absolute_stake_cap: float = 500.0
+
+
+settings = Settings()
