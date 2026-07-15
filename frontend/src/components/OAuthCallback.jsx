@@ -1,15 +1,20 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { api, setAuthToken } from '../api.js'
 
 export default function OAuthCallback({ onDone }) {
   const [error, setError] = useState('')
+  const startedRef = useRef(false) // guards against double-submitting the same code
 
   useEffect(() => {
+    if (startedRef.current) return
+    startedRef.current = true
+
     async function exchange() {
       const params = new URLSearchParams(window.location.search)
       const errorParam = params.get('error')
       if (errorParam) {
         const description = params.get('error_description') || errorParam
+        window.history.replaceState({}, '', '/')
         setError(`Deriv login was not completed: ${description}`)
         return
       }
@@ -21,11 +26,14 @@ export default function OAuthCallback({ onDone }) {
         return
       }
 
+      // Clear code/state from the URL immediately, before the exchange —
+      // an authorization code is single-use, so if this tab gets reloaded
+      // mid-request we must not resubmit the same code to Deriv.
+      window.history.replaceState({}, '', '/')
+
       try {
         const res = await api.derivCallback(code, state)
         setAuthToken(res.access_token)
-        // Clean the code/state params out of the URL bar before moving on.
-        window.history.replaceState({}, '', '/')
         onDone(res)
       } catch (err) {
         setError(err.message)

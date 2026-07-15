@@ -9,6 +9,14 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     deriv_app_id: str = "1089"
+    # The WebSocket trading API (ws.derivws.com) still expects the older
+    # numeric "legacy" app_id in its connection URL — this is DIFFERENT
+    # from the OAuth client_id used for the auth.deriv.com PKCE flow below.
+    # Deriv's own docs: "app_id: Your legacy app ID... include this only
+    # if you also maintain a legacy API app." The shared default (1089)
+    # works for the WS connection regardless of which OAuth client_id your
+    # own app was issued.
+    deriv_legacy_app_id: str = "1089"
     deriv_api_token: str = ""
     deriv_account_mode: str = "demo"  # "demo" | "real"
     deriv_ws_url: str = "wss://ws.derivws.com/websockets/v3"

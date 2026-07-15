@@ -34,7 +34,9 @@ class DerivClient:
 
     def __init__(self, api_token: str, app_id: Optional[str] = None):
         self.api_token = api_token
-        self.app_id = app_id or settings.deriv_app_id
+        # WS connections need the legacy numeric app_id, not the OAuth
+        # client_id — see the note in config.py.
+        self.app_id = app_id or settings.deriv_legacy_app_id
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self._pending: dict[int, asyncio.Future] = {}
         self._listener_task: Optional[asyncio.Task] = None
