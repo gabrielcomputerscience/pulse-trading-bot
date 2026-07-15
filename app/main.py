@@ -28,11 +28,11 @@ from app.strategies import RECOMMENDED_STRATEGIES, STRATEGY_REGISTRY
 app = FastAPI(title="Pulse Trading Platform API")
 
 # Allow the local Vite dev server (and any origin you deploy the frontend to)
-# to call this API. Tighten allow_origins to your real frontend domain(s)
-# before hosting this for anyone but yourself.
+# to call this API. Set ALLOWED_ORIGINS in your env — no code edit needed
+# per deploy.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

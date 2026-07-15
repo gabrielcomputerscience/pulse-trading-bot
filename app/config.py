@@ -15,7 +15,17 @@ class Settings(BaseSettings):
     deriv_oauth_url: str = "https://oauth.deriv.com/oauth2/authorize"
     # Must exactly match a Redirect URI registered for this app at
     # https://developers.deriv.com — Deriv rejects the OAuth flow otherwise.
-    deriv_redirect_uri: str = "http://localhost:5173/oauth/callback"
+    # Deriv does not allow localhost redirect URLs, so this needs to be a
+    # real HTTPS URL even during early testing (see README "Deployment").
+    deriv_redirect_uri: str = "https://your-frontend-domain.example/oauth/callback"
+
+    # Comma-separated list of frontend origins allowed to call this API.
+    # Set this in your host's env vars — no code edit needed per deploy.
+    allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
     database_url: str = "sqlite:///./pulse.db"
     secret_key: str = "changeme"
