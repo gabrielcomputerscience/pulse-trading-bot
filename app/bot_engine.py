@@ -29,9 +29,10 @@ CANDLE_INTERVAL_SECONDS = 60  # 1-minute candles built from raw ticks
 
 
 class RunningBot:
-    def __init__(self, bot: Bot, api_token: str, db_session_factory):
+    def __init__(self, bot: Bot, api_token: str, account_id: str, db_session_factory):
         self.bot_config = bot
         self.api_token = api_token
+        self.account_id = account_id
         self.db_session_factory = db_session_factory
         self.strategy = get_strategy(bot.strategy)
         self.ctx = StrategyContext(candles=[])
@@ -49,7 +50,7 @@ class RunningBot:
 
     async def start(self):
         self.client = DerivClient(api_token=self.api_token)
-        await self.client.connect()
+        await self.client.connect(account_id=self.account_id)
         self._task = asyncio.create_task(self._run())
 
     async def stop(self):
@@ -177,10 +178,10 @@ class BotManager:
         self.db_session_factory = db_session_factory
         self._running: dict[int, RunningBot] = {}
 
-    async def start_bot(self, bot: Bot, api_token: str):
+    async def start_bot(self, bot: Bot, api_token: str, account_id: str):
         if bot.id in self._running:
             return
-        running = RunningBot(bot, api_token, self.db_session_factory)
+        running = RunningBot(bot, api_token, account_id, self.db_session_factory)
         await running.start()
         self._running[bot.id] = running
 

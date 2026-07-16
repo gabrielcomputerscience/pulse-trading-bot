@@ -1,24 +1,42 @@
 """
-Thin async wrapper around Deriv's WebSocket API (v3).
+Deriv trading API client — rebuilt against the current API (verified live
+against Deriv's own API Playground, July 2026).
 
-Docs: https://developers.deriv.com/docs/websockets
-Every call here is a request/response or subscribe/stream pair over a single
-persistent websocket connection, matched by Deriv's `req_id`.
+Deriv now runs a REST + WebSocket "Options" API:
+  - REST (https://api.derivws.com/trading/v1/options/...): account listing
+    and OTP issuance for opening an authenticated WebSocket connection.
+    Auth via `Deriv-App-ID` header + `Authorization: Bearer <token>`
+    (either an OAuth 2.0 access_token or a Personal Access Token generated
+    at developers.deriv.com/dashboard/tokens).
+  - WebSocket:
+      - Public, no auth: wss://api.derivws.com/trading/v1/options/ws/public
+        — used for market data (ticks/history), which isn't account-specific.
+      - Per-account, authenticated via a short-lived OTP embedded directly
+        in the URL (obtained from the REST OTP endpoint):
+        .../ws/demo?otp=... or .../ws/real?otp=...
 
-This module is intentionally the ONLY place that talks to Deriv. The
-frontend / API layer never sees a raw Deriv token — it goes user -> DB
-(encrypted) -> here -> Deriv.
+Trading message shapes (ticks_history, balance, proposal, buy, sell,
+forget) are UNCHANGED from the older "legacy" WS API this was originally
+built against — verified live, request and response both match exactly.
+Only the connection/auth handshake changed; a single Bearer token now
+covers every account under that login (no more separate per-account
+tokens), and there's no `authorize` message anymore — auth happens via the
+OTP-bearing URL itself.
 """
 import asyncio
 import itertools
 import json
 from typing import AsyncIterator, Optional
 
+import httpx
 import websockets
 
 from app.config import settings
 
 _req_id_counter = itertools.count(1)
+
+REST_BASE_URL = "https://api.derivws.com"
+PUBLIC_WS_URL = "wss://api.derivws.com/trading/v1/options/ws/public"
 
 
 class DerivAPIError(Exception):
@@ -26,31 +44,66 @@ class DerivAPIError(Exception):
 
 
 class DerivClient:
-    """
-    One instance per active user session / bot. Not thread-safe across
-    multiple concurrent bots on the same instance — spin up one per bot
-    (see bot_engine.py).
-    """
+    """One instance per connection. For account-specific work (balance,
+    proposal, buy, sell) call connect(account_id=...). For public market
+    data (ticks_history, tick subscriptions) call connect() with no
+    account_id — no token needed at all for that case."""
 
-    def __init__(self, api_token: str, app_id: Optional[str] = None):
+    def __init__(self, api_token: str = "", app_id: Optional[str] = None):
         self.api_token = api_token
-        # WS connections need the legacy numeric app_id, not the OAuth
-        # client_id — see the note in config.py.
-        self.app_id = app_id or settings.deriv_legacy_app_id
+        self.app_id = app_id or settings.deriv_app_id
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self._pending: dict[int, asyncio.Future] = {}
         self._listener_task: Optional[asyncio.Task] = None
         self._tick_subscribers: dict[str, list[asyncio.Queue]] = {}
         self.account_info: dict = {}
 
+    # ---- REST (account discovery + OTP) --------------------------------
+
+    def _rest_headers(self) -> dict:
+        return {"Deriv-App-ID": self.app_id, "Authorization": f"Bearer {self.api_token}"}
+
+    async def list_accounts(self) -> list[dict]:
+        """Every account (demo + real) the token's owner has, via REST.
+        Each entry: account_id, balance, currency, account_type ('demo'/
+        'real'), status."""
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{REST_BASE_URL}/trading/v1/options/accounts",
+                                     headers=self._rest_headers())
+        if resp.status_code != 200:
+            raise DerivAPIError(f"Failed to list accounts ({resp.status_code}): {resp.text}")
+        return resp.json().get("data", [])
+
+    async def _get_otp_ws_url(self, account_id: str) -> str:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{REST_BASE_URL}/trading/v1/options/accounts/{account_id}/otp",
+                headers=self._rest_headers())
+        if resp.status_code != 200:
+            raise DerivAPIError(f"Failed to get a connection OTP for {account_id} "
+                                 f"({resp.status_code}): {resp.text}")
+        return resp.json()["data"]["url"]
+
     # ---- connection lifecycle -------------------------------------------------
 
-    async def connect(self, authorize: bool = True):
-        url = f"{settings.deriv_ws_url}?app_id={self.app_id}"
+    async def connect(self, account_id: Optional[str] = None):
+        if account_id:
+            accounts = await self.list_accounts()
+            match = next((a for a in accounts if a["account_id"] == account_id), None)
+            if not match:
+                raise DerivAPIError(f"Account {account_id} not found for this token.")
+            self.account_info = {
+                "loginid": match["account_id"],
+                "is_virtual": match.get("account_type") == "demo",
+                "currency": match.get("currency", "USD"),
+                "balance": match.get("balance"),
+            }
+            url = await self._get_otp_ws_url(account_id)
+        else:
+            url = PUBLIC_WS_URL
+
         self.ws = await websockets.connect(url, ping_interval=20, ping_timeout=10)
         self._listener_task = asyncio.create_task(self._listen())
-        if authorize:
-            await self.authorize()
 
     async def close(self):
         if self._listener_task:
@@ -59,8 +112,6 @@ class DerivClient:
             await self.ws.close()
 
     async def _listen(self):
-        """Background task: routes every incoming frame either to a pending
-        request future (matched by req_id) or to a tick subscriber queue."""
         assert self.ws is not None
         async for raw in self.ws:
             msg = json.loads(raw)
@@ -89,29 +140,16 @@ class DerivClient:
         await self.ws.send(json.dumps(payload))
         return await asyncio.wait_for(fut, timeout=timeout)
 
-    # ---- auth -------------------------------------------------------------
-
-    async def authorize(self) -> dict:
-        """Authorize this websocket connection using the user's API token.
-        Deriv resolves whether that token maps to a demo or real account
-        server-side based on which of the user's accounts the token was
-        scoped to — so demo/real is determined by which token was issued,
-        not by a flag we send."""
-        resp = await self._send({"authorize": self.api_token})
-        self.account_info = resp.get("authorize", {})
-        return self.account_info
-
-    # ---- historical data (for backtesting) ---------------------------------
+    # ---- historical data (public — no auth needed) ---------------------
 
     async def ticks_history(self, symbol: str, count: int = 5000, style: str = "ticks") -> list[dict]:
-        """Pull real historical ticks/candles for backtesting. This is the
-        actual market history — not synthetic/fabricated data."""
         resp = await self._send({
             "ticks_history": symbol,
             "adjust_start_time": 1,
             "count": count,
             "end": "latest",
-            "style": style,  # "ticks" or "candles"
+            "start": 1,
+            "style": style,
         })
         if style == "candles":
             return resp.get("candles", [])
@@ -120,11 +158,9 @@ class DerivClient:
         times = history.get("times", [])
         return [{"epoch": t, "price": p} for t, p in zip(times, prices)]
 
-    # ---- live streaming -----------------------------------------------------
+    # ---- live streaming (public) -----------------------------------------
 
     async def subscribe_ticks(self, symbol: str) -> AsyncIterator[dict]:
-        """Subscribe once, yield forever. Multiple callers can subscribe to
-        the same symbol; each gets its own queue fed by the shared listener."""
         await self._send({"ticks": symbol, "subscribe": 1})
         queue: asyncio.Queue = asyncio.Queue()
         self._tick_subscribers.setdefault(symbol, []).append(queue)
@@ -135,13 +171,10 @@ class DerivClient:
         finally:
             self._tick_subscribers[symbol].remove(queue)
 
-    # ---- trading ------------------------------------------------------------
+    # ---- trading (requires connect(account_id=...)) -----------------------
 
     async def proposal(self, symbol: str, contract_type: str, stake: float,
                         duration: int = 5, duration_unit: str = "t") -> dict:
-        """Request a price quote for a contract before buying it.
-        contract_type: 'CALL' (rise) or 'PUT' (fall) for rise/fall contracts.
-        duration_unit: 't' = ticks, 's' = seconds, 'm' = minutes."""
         resp = await self._send({
             "proposal": 1,
             "amount": stake,
@@ -155,13 +188,10 @@ class DerivClient:
         return resp.get("proposal", {})
 
     async def buy(self, proposal_id: str, price: float) -> dict:
-        """Execute the trade using a proposal id from proposal(). `price` is
-        the max price willing to pay (usually the proposal's ask price)."""
         resp = await self._send({"buy": proposal_id, "price": price})
         return resp.get("buy", {})
 
     async def sell_contract(self, contract_id: int, price: float = 0) -> dict:
-        """Close/sell an open contract early if supported for that contract type."""
         resp = await self._send({"sell": contract_id, "price": price})
         return resp.get("sell", {})
 

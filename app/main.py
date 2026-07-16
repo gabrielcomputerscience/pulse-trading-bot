@@ -49,58 +49,53 @@ def on_startup():
 # ---------------------------------------------------------------------------
 # Auth — Personal Access Token login (primary flow)
 #
-# Deriv currently runs two separate, incompatible API systems: a newer
-# REST + WebSocket "Options" API (what OAuth 2.0 access tokens are for),
-# and the older WebSocket trading API that this whole backend is built on
-# (what Deriv's own docs now label "Options Trading (Legacy)"). OAuth
-# access tokens are not accepted by the legacy `authorize` command — they're
-# a different token system entirely. Personal Access Tokens (PATs), which
-# users generate themselves in Deriv's dashboard, DO work with the legacy
-# API, so that's what this app uses for login. No password, no separate
-# signup — same as before, just a pasted token instead of an OAuth redirect.
+# Verified live against Deriv's own API Playground: a single Bearer token
+# (a PAT generated at developers.deriv.com/dashboard/tokens, or an OAuth
+# access_token) authenticates REST calls to list every account — demo and
+# real — under that login in one shot. No separate per-account token
+# needed; only the account_id differs between demo/real when opening a
+# trading WebSocket connection later. See deriv_client.py for the full
+# picture of how the current API works.
 # ---------------------------------------------------------------------------
 
-async def _discover_and_upsert_deriv_user(db: Session, token: str) -> tuple[User, dict]:
-    """Authorizes over the (legacy) WebSocket API with the given token to
-    discover which Deriv account it belongs to, then creates or updates the
-    matching local User row. Shared by the PAT login endpoint below."""
+async def _discover_and_upsert_deriv_user(db: Session, token: str) -> tuple[User, list[dict]]:
+    """Lists accounts for the given token via REST, then creates or updates
+    the matching local User row. Shared by the PAT login endpoint below."""
     client = DerivClient(api_token=token)
     try:
-        await client.connect()
-        info = client.account_info
+        accounts = await client.list_accounts()
     except Exception as e:
         raise HTTPException(400, f"Deriv rejected that token: {e}")
-    finally:
-        await client.close()
 
-    loginid = info.get("loginid")
-    if not loginid:
-        raise HTTPException(400, "Deriv accepted the token but returned no account info.")
-    is_virtual = bool(info.get("is_virtual"))
-    currency = info.get("currency", "USD")
+    if not accounts:
+        raise HTTPException(400, "Deriv accepted the token but returned no accounts.")
+
+    demo = next((a for a in accounts if a.get("account_type") == "demo"), None)
+    real = next((a for a in accounts if a.get("account_type") != "demo"), None)
+    primary = real or demo
+    loginid = primary["account_id"]
 
     user = (db.query(User)
             .filter((User.deriv_loginid == loginid)
-                    | (User.deriv_demo_loginid == loginid)
-                    | (User.deriv_real_loginid == loginid))
+                    | (User.deriv_demo_account_id == (demo["account_id"] if demo else None))
+                    | (User.deriv_real_account_id == (real["account_id"] if real else None)))
             .first())
     if not user:
         user = User(deriv_loginid=loginid)
         db.add(user)
 
-    user.deriv_currency = currency
-    if is_virtual:
-        user.deriv_demo_loginid = loginid
-        user.deriv_demo_token_encrypted = encrypt_token(token)
-    else:
-        user.deriv_real_loginid = loginid
-        user.deriv_real_token_encrypted = encrypt_token(token)
-        if not user.deriv_loginid:
-            user.deriv_loginid = loginid
+    user.deriv_bearer_token_encrypted = encrypt_token(token)
+    user.deriv_currency = primary.get("currency", "USD")
+    if demo:
+        user.deriv_demo_account_id = demo["account_id"]
+    if real:
+        user.deriv_real_account_id = real["account_id"]
+    if not user.deriv_loginid:
+        user.deriv_loginid = loginid
 
     db.commit()
     db.refresh(user)
-    return user, info
+    return user, accounts
 
 
 class DerivPatLoginRequest(BaseModel):
@@ -109,51 +104,46 @@ class DerivPatLoginRequest(BaseModel):
 
 @app.post("/auth/deriv-pat")
 async def deriv_pat_login(req: DerivPatLoginRequest, db: Session = Depends(get_db)):
-    """Log in (or link an additional account) using a Deriv Personal Access
-    Token. Generate one at Deriv → Settings → API Token, scoped to Read +
-    Trade only — paste it here directly, it's encrypted at rest and never
+    """Log in using a Deriv Personal Access Token. Generate one at
+    developers.deriv.com → API tokens, scoped to Trade + Account
+    management — paste it here directly, it's encrypted at rest and never
     logged or returned in any response after this."""
-    user, info = await _discover_and_upsert_deriv_user(db, req.token)
+    user, accounts = await _discover_and_upsert_deriv_user(db, req.token)
     return {
         "access_token": create_access_token_for_user(user),
         "token_type": "bearer",
         "deriv_loginid": user.deriv_loginid,
-        "has_demo": bool(user.deriv_demo_token_encrypted),
-        "has_real": bool(user.deriv_real_token_encrypted),
-        "connected_account_is_demo": bool(info.get("is_virtual")),
+        "has_demo": bool(user.deriv_demo_account_id),
+        "has_real": bool(user.deriv_real_account_id),
     }
 
 
 @app.post("/auth/deriv-pat/add")
 async def deriv_pat_add_account(req: DerivPatLoginRequest, user: User = Depends(get_current_user),
                                  db: Session = Depends(get_db)):
-    """Link a second account (e.g. add a real-money token when you first
-    logged in with only a demo token) to the currently signed-in user."""
-    updated_user, info = await _discover_and_upsert_deriv_user(db, req.token)
+    """Re-run discovery with a token from a different Deriv login, linking
+    it to the currently signed-in user. Rarely needed now — one token
+    already reveals both demo and real accounts for its own login."""
+    updated_user, accounts = await _discover_and_upsert_deriv_user(db, req.token)
     if updated_user.id != user.id:
         raise HTTPException(
             400,
             "That token belongs to a different Deriv login than the one you're signed in as."
         )
     return {
-        "has_demo": bool(updated_user.deriv_demo_token_encrypted),
-        "has_real": bool(updated_user.deriv_real_token_encrypted),
-        "connected_account_is_demo": bool(info.get("is_virtual")),
+        "has_demo": bool(updated_user.deriv_demo_account_id),
+        "has_real": bool(updated_user.deriv_real_account_id),
     }
 
 
 # ---------------------------------------------------------------------------
-# Auth — Deriv OAuth (kept, but NOT wired to trading — see note above).
-# The token this produces is only verified to work for the exchange itself;
-# it is not usable with the legacy WebSocket API the rest of this backend
-# relies on. Left here in case a future REST+WS migration revisits this.
+# Auth — Deriv OAuth (kept, functional for the exchange itself — the
+# resulting access_token works the same as a PAT for REST calls, so it's
+# actually usable here too; just not wired into the primary login screen).
 # ---------------------------------------------------------------------------
 
 @app.get("/auth/deriv/login")
 def deriv_login_url():
-    """Frontend redirects the browser to this URL. No backend redirect
-    needed here — returning the URL as JSON keeps this endpoint simple and
-    lets the frontend do the actual navigation."""
     return {"url": build_authorize_url()}
 
 
@@ -164,75 +154,59 @@ class DerivCallbackRequest(BaseModel):
 
 @app.post("/auth/deriv/callback")
 async def deriv_callback(req: DerivCallbackRequest, db: Session = Depends(get_db)):
-    """NOTE: functional for the OAuth exchange itself, but the resulting
-    access_token is not currently usable for trading (see module note
-    above) — not used by the frontend's primary login flow."""
     try:
         token_data = await exchange_code_for_token(req.code, req.state)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
     access_token = token_data["access_token"]
-    user, info = await _discover_and_upsert_deriv_user(db, access_token)
+    user, accounts = await _discover_and_upsert_deriv_user(db, access_token)
 
     return {
         "access_token": create_access_token_for_user(user),
         "token_type": "bearer",
         "deriv_loginid": user.deriv_loginid,
-        "has_demo": bool(user.deriv_demo_token_encrypted),
-        "has_real": bool(user.deriv_real_token_encrypted),
-        "connected_account_is_demo": bool(info.get("is_virtual")),
+        "has_demo": bool(user.deriv_demo_account_id),
+        "has_real": bool(user.deriv_real_account_id),
     }
 
 
 @app.get("/account/balances")
 async def account_balances(user: User = Depends(get_current_user)):
-    """Live balances pulled directly from Deriv for whichever account types
-    this user connected — not stored/cached numbers."""
+    """Live balances pulled directly from Deriv via REST — a single call
+    returns both demo and real in one shot, no WebSocket connection needed
+    at all for this."""
+    if not user.deriv_bearer_token_encrypted:
+        raise HTTPException(400, "Connect your Deriv account first.")
+
+    client = DerivClient(api_token=decrypt_token(user.deriv_bearer_token_encrypted))
+    try:
+        accounts = await client.list_accounts()
+    except Exception as e:
+        raise HTTPException(400, f"Failed to fetch accounts: {e}")
+
     result = {"demo": None, "real": None}
-
-    for mode, loginid, token_encrypted in [
-        ("demo", user.deriv_demo_loginid, user.deriv_demo_token_encrypted),
-        ("real", user.deriv_real_loginid, user.deriv_real_token_encrypted),
-    ]:
-        if not token_encrypted:
-            continue
-        client = DerivClient(api_token=decrypt_token(token_encrypted))
-        try:
-            await client.connect()
-            bal = await client.balance()
-            result[mode] = {
-                "loginid": loginid,
-                "balance": bal.get("balance"),
-                "currency": bal.get("currency"),
-            }
-        except Exception as e:
-            result[mode] = {"loginid": loginid, "error": str(e)}
-        finally:
-            await client.close()
-
+    for a in accounts:
+        entry = {"loginid": a["account_id"], "balance": a.get("balance"), "currency": a.get("currency")}
+        if a.get("account_type") == "demo":
+            result["demo"] = entry
+        else:
+            result["real"] = entry
     return result
 
 
-def _token_for_bot_mode(user: User, mode: str) -> str:
-    encrypted = user.token_for_mode(mode)
-    if not encrypted:
+def _bot_connection_info(user: User, mode: str) -> tuple[str, str]:
+    """Returns (decrypted_bearer_token, account_id) for opening a trading
+    connection in the given mode."""
+    if not user.deriv_bearer_token_encrypted:
+        raise HTTPException(400, "Connect your Deriv account first.")
+    account_id = user.account_id_for_mode(mode)
+    if not account_id:
         raise HTTPException(
             400,
-            f"No {mode} Deriv account connected. Sign in with Deriv again and approve a {mode} account, "
-            "or switch this bot's mode."
+            f"No {mode} Deriv account linked to this login. Log in again or link one from the sidebar."
         )
-    return decrypt_token(encrypted)
-
-
-def _any_token(user: User) -> str:
-    """For backtesting: historical market data access doesn't depend on
-    demo vs real, so use whichever token is available."""
-    encrypted = (user.deriv_demo_token_encrypted or user.deriv_real_token_encrypted
-                 or user.deriv_token_encrypted)
-    if not encrypted:
-        raise HTTPException(400, "Connect your Deriv account first via Continue with Deriv.")
-    return decrypt_token(encrypted)
+    return decrypt_token(user.deriv_bearer_token_encrypted), account_id
 
 
 # ---------------------------------------------------------------------------
@@ -395,13 +369,15 @@ class FreeformBacktestRequest(BaseModel):
 async def freeform_backtest(req: FreeformBacktestRequest, user: User = Depends(get_current_user),
                              db: Session = Depends(get_db)):
     """Run a backtest without first saving a bot — for exploring a
-    strategy/asset combination in the Backtest Lab before committing to it."""
+    strategy/asset combination in the Backtest Lab before committing to it.
+    Historical market data is public, so this doesn't need your Deriv
+    account connected at all — login is required here only to keep the API
+    consistently behind auth, not because the data itself needs it."""
     if req.strategy not in STRATEGY_REGISTRY:
         raise HTTPException(400, f"Unknown strategy. Valid: {list(STRATEGY_REGISTRY)}")
 
-    token = _any_token(user)
     result = await run_backtest(
-        api_token=token, symbol=req.asset, strategy_name=req.strategy,
+        symbol=req.asset, strategy_name=req.strategy,
         base_stake=req.base_stake, lookback_candles=req.lookback_candles,
         assumed_payout_ratio=req.assumed_payout_ratio,
     )
@@ -412,9 +388,8 @@ async def freeform_backtest(req: FreeformBacktestRequest, user: User = Depends(g
 async def backtest_bot(bot_id: int, req: BacktestRequest, user: User = Depends(get_current_user),
                         db: Session = Depends(get_db)):
     bot = _get_owned_bot(bot_id, user, db)
-    token = _any_token(user)
     result = await run_backtest(
-        api_token=token, symbol=bot.asset, strategy_name=bot.strategy,
+        symbol=bot.asset, strategy_name=bot.strategy,
         base_stake=bot.stake, lookback_candles=req.lookback_candles,
         assumed_payout_ratio=req.assumed_payout_ratio,
     )
@@ -446,8 +421,8 @@ async def start_bot(bot_id: int, confirm_real_money: bool = False,
             bot.account_mode = "demo"
     db.commit()
 
-    token = _token_for_bot_mode(user, bot.account_mode)
-    await bot_manager.start_bot(bot, token)
+    token, account_id = _bot_connection_info(user, bot.account_mode)
+    await bot_manager.start_bot(bot, token, account_id)
     return {"status": bot.status, "forced_demo_remaining_hours": max(
         0, settings.forced_demo_hours - elapsed.total_seconds() / 3600)}
 

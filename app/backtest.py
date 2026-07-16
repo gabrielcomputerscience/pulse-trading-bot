@@ -50,7 +50,6 @@ def _candles_from_history(raw_candles: list[dict]) -> list[Candle]:
 
 
 async def run_backtest(
-    api_token: str,
     symbol: str,
     strategy_name: str,
     base_stake: float = 1.0,
@@ -58,7 +57,9 @@ async def run_backtest(
     lookback_candles: int = 3000,
     strategy_kwargs: dict | None = None,
 ) -> BacktestResult:
-    client = DerivClient(api_token=api_token)
+    # Historical candle data is public on the current API — no Deriv token
+    # or account needed at all, verified live via Deriv's own Playground.
+    client = DerivClient()
     await client.connect()
     try:
         raw = await client.ticks_history(symbol, count=lookback_candles, style="candles")

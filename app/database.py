@@ -38,36 +38,29 @@ class User(Base):
 
     id = Column(Integer, primary_key=True)
 
-    # Legacy manual-signup path (still usable via /docs, not shown in the UI
-    # anymore now that Deriv OAuth is the primary login).
+    # Legacy manual-signup path (still usable via /docs, not shown in the UI).
     username = Column(String, unique=True, nullable=True, index=True)
     hashed_password = Column(String, nullable=True)
-    deriv_token_encrypted = Column(String, nullable=True)  # legacy single-token field
+    deriv_token_encrypted = Column(String, nullable=True)  # unused by current flow, kept for /docs testing
 
-    # Deriv OAuth identity + per-account-type tokens. Deriv can hand back
-    # several accounts (usually one demo + one or more real) in a single
-    # OAuth approval; we keep the demo and the primary real token
-    # separately so bots can be pointed at either explicitly.
+    # Current design: a single Bearer token (PAT or OAuth access_token)
+    # covers every account under that Deriv login — verified live against
+    # Deriv's REST accounts endpoint, which returns both demo and real
+    # accounts from one authenticated call. Only the account_id differs
+    # between demo/real; the token itself doesn't.
     deriv_loginid = Column(String, unique=True, nullable=True, index=True)
-    deriv_demo_loginid = Column(String, nullable=True)
-    deriv_demo_token_encrypted = Column(String, nullable=True)
-    deriv_real_loginid = Column(String, nullable=True)
-    deriv_real_token_encrypted = Column(String, nullable=True)
+    deriv_bearer_token_encrypted = Column(String, nullable=True)
+    deriv_demo_account_id = Column(String, nullable=True)
+    deriv_real_account_id = Column(String, nullable=True)
     deriv_currency = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=dt.datetime.utcnow)
 
     bots = relationship("Bot", back_populates="owner", cascade="all, delete-orphan")
 
-    def token_for_mode(self, mode: str) -> str | None:
-        """mode: 'demo' | 'real'. Falls back to the legacy single token
-        field if the OAuth-specific fields aren't populated (manual-token
-        users)."""
-        if mode == "real" and self.deriv_real_token_encrypted:
-            return self.deriv_real_token_encrypted
-        if mode == "demo" and self.deriv_demo_token_encrypted:
-            return self.deriv_demo_token_encrypted
-        return self.deriv_token_encrypted
+    def account_id_for_mode(self, mode: str) -> str | None:
+        """mode: 'demo' | 'real'."""
+        return self.deriv_demo_account_id if mode == "demo" else self.deriv_real_account_id
 
 
 class Bot(Base):

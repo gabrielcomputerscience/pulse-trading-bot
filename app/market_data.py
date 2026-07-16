@@ -30,10 +30,10 @@ class TickerEntry:
 
 async def fetch_ticker(symbols: list[tuple[str, str]] | None = None) -> list[TickerEntry]:
     symbols = symbols or DEFAULT_SYMBOLS
-    client = DerivClient(api_token="")  # no token needed for public candle data
+    client = DerivClient()  # no token needed at all for public market data
     entries: list[TickerEntry] = []
 
-    await client.connect(authorize=False)
+    await client.connect()
     try:
         for symbol, display_name in symbols:
             try:
