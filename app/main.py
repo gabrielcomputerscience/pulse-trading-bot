@@ -520,6 +520,51 @@ def bot_status(bot_id: int, user: User = Depends(get_current_user), db: Session 
 # yet. Expand this list only after testing each contract_type on demo.
 # ---------------------------------------------------------------------------
 
+async def _resolve_manual_trade(token: str, account_id: str, trade_id: int, contract_id: int,
+                                 poll_interval: float = 3.0, max_attempts: int = 200):
+    """Same fix as bot trades: without this, a manual trade's profit_loss
+    stays null forever, since Deriv doesn't push the result to us — we have
+    to poll for it. Opens its own short-lived connection since the one used
+    to place the trade is already closed by the time this runs."""
+    client = DerivClient(api_token=token)
+    try:
+        await client.connect(account_id=account_id)
+        for _ in range(max_attempts):
+            await asyncio.sleep(poll_interval)
+            try:
+                status = await client.check_open_contract(contract_id)
+            except Exception:
+                logging.getLogger("manual_trade").exception(
+                    "Failed checking contract %s for trade %s", contract_id, trade_id)
+                continue
+
+            if not status.get("is_sold"):
+                continue
+
+            profit_loss = status.get("profit")
+            if profit_loss is None:
+                sell_price, buy_price = status.get("sell_price"), status.get("buy_price")
+                if sell_price is not None and buy_price is not None:
+                    profit_loss = float(sell_price) - float(buy_price)
+
+            db = SessionLocal()
+            try:
+                trade = db.query(Trade).filter(Trade.id == trade_id).first()
+                if trade:
+                    trade.profit_loss = profit_loss
+                    trade.exit_price = status.get("sell_price")
+                    trade.closed_at = dt.datetime.utcnow()
+                    db.commit()
+            finally:
+                db.close()
+            return
+    except Exception:
+        logging.getLogger("manual_trade").exception(
+            "Resolution connection failed for trade %s", trade_id)
+    finally:
+        await client.close()
+
+
 class ManualTradeRequest(BaseModel):
     mode: str  # "demo" | "real"
     symbol: str
@@ -589,6 +634,9 @@ async def execute_manual_trade(req: ManualTradeRequest, user: User = Depends(get
     db.add(trade)
     db.commit()
     db.refresh(trade)
+
+    if buy_result.get("contract_id"):
+        asyncio.create_task(_resolve_manual_trade(token, account_id, trade.id, buy_result["contract_id"]))
 
     return {
         "trade_id": trade.id,

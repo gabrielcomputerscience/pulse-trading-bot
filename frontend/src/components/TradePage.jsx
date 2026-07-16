@@ -44,25 +44,30 @@ const TRADE_TYPES = {
 }
 
 const FEED_POLL_MS = 6000
+const ITERATION_POLL_MS = 5000
 
 export default function TradePage() {
-  const [mode, setMode] = useState('demo')
   const [symbol, setSymbol] = useState('R_75')
-  const [tradeType, setTradeType] = useState('rise_fall')
+
+  // Smart trade — the primary, simplified flow
   const [stake, setStake] = useState(1)
+  const [stopLoss, setStopLoss] = useState('')
+  const [takeProfit, setTakeProfit] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [scanError, setScanError] = useState('')
+  const [activeBot, setActiveBot] = useState(null) // { id, strategy, asset, winRate }
+  const [iterations, setIterations] = useState([])
+  const [stopping, setStopping] = useState(false)
+
+  // Manual trade — secondary, simple panel
+  const [mode, setMode] = useState('demo')
+  const [tradeType, setTradeType] = useState('rise_fall')
+  const [manualStake, setManualStake] = useState(1)
   const [duration, setDuration] = useState(5)
   const [durationUnit, setDurationUnit] = useState('t')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [manualBusy, setManualBusy] = useState(false)
+  const [manualError, setManualError] = useState('')
   const [lastResult, setLastResult] = useState(null)
-
-  // Scan & auto-trade panel
-  const [scanStopLoss, setScanStopLoss] = useState('')
-  const [scanTakeProfit, setScanTakeProfit] = useState('')
-  const [scanning, setScanning] = useState(false)
-  const [scanResult, setScanResult] = useState(null)
-  const [launching, setLaunching] = useState(null)
-  const [launchMessage, setLaunchMessage] = useState('')
 
   // Live combined transaction feed + win/loss toasts
   const [feed, setFeed] = useState(null)
@@ -89,9 +94,7 @@ export default function TradePage() {
       })
       firstFeedLoadRef.current = false
       setFeed(data)
-    } catch (_) {
-      // non-critical, retry next poll
-    }
+    } catch (_) { /* retry next poll */ }
   }
 
   useEffect(() => {
@@ -100,65 +103,86 @@ export default function TradePage() {
     return () => clearInterval(id)
   }, [])
 
+  // Poll the active auto-trade bot's own trades for the iteration list
+  useEffect(() => {
+    if (!activeBot) return
+    async function loadIterations() {
+      try {
+        const trades = await api.botTrades(activeBot.id)
+        setIterations(trades.slice().reverse()) // oldest first, so "Iteration 1" reads naturally
+      } catch (_) { /* retry next poll */ }
+    }
+    loadIterations()
+    const id = setInterval(loadIterations, ITERATION_POLL_MS)
+    return () => clearInterval(id)
+  }, [activeBot])
+
   function dismissToast(id) {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }
 
+  async function startSmartTrade() {
+    setScanError('')
+    setScanning(true)
+    try {
+      const scan = await api.runScan({ base_stake: parseFloat(stake), lookback_candles: 3000 })
+      if (!scan.top_pick) {
+        setScanError(scan.note || 'Nothing currently qualifies — try again later or adjust your stake.')
+        return
+      }
+      const launch = await api.launchScanResult({
+        strategy: scan.top_pick.strategy,
+        asset: scan.top_pick.symbol,
+        stake: parseFloat(stake),
+        stop_loss: stopLoss ? parseFloat(stopLoss) : null,
+        take_profit: takeProfit ? parseFloat(takeProfit) : null,
+      })
+      setActiveBot({
+        id: launch.bot_id, strategy: scan.top_pick.strategy,
+        asset: scan.top_pick.symbol, winRate: scan.top_pick.win_rate,
+      })
+      setIterations([])
+    } catch (err) {
+      setScanError(err.message)
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  async function stopSmartTrade() {
+    if (!activeBot) return
+    setStopping(true)
+    try {
+      await api.stopBot(activeBot.id)
+    } catch (_) { /* ignore, still clear locally */ } finally {
+      setStopping(false)
+      setActiveBot(null)
+    }
+  }
+
   const activeType = TRADE_TYPES[tradeType]
 
-  async function placeTrade(direction) {
-    setError('')
-    setBusy(true)
+  async function placeManualTrade(direction) {
+    setManualError('')
+    setManualBusy(true)
     try {
       const res = await api.executeManualTrade({
         mode, symbol, trade_type: tradeType, direction,
-        stake: parseFloat(stake),
+        stake: parseFloat(manualStake),
         duration: parseInt(duration, 10),
         duration_unit: durationUnit,
       })
       setLastResult({ direction, ...res })
       loadFeed()
     } catch (err) {
-      setError(err.message)
+      setManualError(err.message)
     } finally {
-      setBusy(false)
+      setManualBusy(false)
     }
   }
 
-  async function runScan() {
-    setError('')
-    setScanResult(null)
-    setLaunchMessage('')
-    setScanning(true)
-    try {
-      const res = await api.runScan({ base_stake: parseFloat(stake), lookback_candles: 3000 })
-      setScanResult(res)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setScanning(false)
-    }
-  }
-
-  async function launchCandidate(candidate) {
-    const key = `${candidate.strategy}-${candidate.symbol}`
-    setLaunching(key)
-    setError('')
-    try {
-      await api.launchScanResult({
-        strategy: candidate.strategy,
-        asset: candidate.symbol,
-        stake: parseFloat(stake),
-        stop_loss: scanStopLoss ? parseFloat(scanStopLoss) : null,
-        take_profit: scanTakeProfit ? parseFloat(scanTakeProfit) : null,
-      })
-      setLaunchMessage(`Launched "${candidate.strategy} / ${candidate.symbol}" on demo — watch the feed below.`)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setLaunching(null)
-    }
-  }
+  const resolvedIterations = iterations.filter((t) => t.profit_loss !== null && t.profit_loss !== undefined)
+  const runningTotal = resolvedIterations.reduce((sum, t) => sum + t.profit_loss, 0)
 
   return (
     <div>
@@ -167,11 +191,81 @@ export default function TradePage() {
       <div className="disclaimer">
         <span>&#9432;</span>
         <span>
-          Manual trades execute instantly at the current price. The scan panel below runs real
-          backtests across every strategy and asset, then can launch the best one as a bot for
-          you — same engine as Auto Scanner, right here. Only <b>Rise/Fall</b> manual trades are
-          confirmed against a real trade; <b>Even/Odd</b> is unverified.
+          Set your stake and risk limits, click one button — it scans every strategy and asset
+          for the best current measured result and starts trading it on demo automatically.
+          Each trade appears below as it resolves, with a running total. This is systematic
+          backtesting run automatically, not an AI predicting the market.
         </span>
+      </div>
+
+      <div className="page-panel" style={{ maxWidth: 640 }}>
+        <div className="section-head">
+          <h2>Smart trade</h2>
+          {activeBot && (
+            <span className="tag tag-strategy">{activeBot.strategy} / {activeBot.asset}</span>
+          )}
+        </div>
+
+        {!activeBot ? (
+          <>
+            <div className="form-row">
+              <div className="field">
+                <label>Stake</label>
+                <input type="number" step="0.01" min="0.01" value={stake} onChange={(e) => setStake(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>Stop loss (optional)</label>
+                <input type="number" step="0.01" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} />
+              </div>
+            </div>
+            <div className="field">
+              <label>Take profit (optional)</label>
+              <input type="number" step="0.01" value={takeProfit} onChange={(e) => setTakeProfit(e.target.value)} />
+            </div>
+
+            {scanError && <div className="error-banner">{scanError}</div>}
+
+            <button className="btn btn-primary" onClick={startSmartTrade} disabled={scanning} style={{ width: '100%', padding: '14px 0', fontSize: 15, fontWeight: 700 }}>
+              {scanning ? 'Scanning for the best combo…' : '▶ Scan & Trade'}
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="metric-grid">
+              <div className="metric">
+                <div className="metric-label">Backtested win rate</div>
+                <div className="metric-value">{(activeBot.winRate * 100).toFixed(1)}%</div>
+              </div>
+              <div className="metric">
+                <div className="metric-label">Running total (demo)</div>
+                <div className={`metric-value ${runningTotal >= 0 ? 'positive' : 'negative'}`}>
+                  {runningTotal >= 0 ? '+' : ''}{runningTotal.toFixed(2)}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ margin: '14px 0' }}>
+              {iterations.length === 0 && (
+                <div className="empty-state">No trades yet — waiting for a signal. This can take 25-45 minutes.</div>
+              )}
+              {iterations.map((t, i) => (
+                <div key={t.id} className="balance-row">
+                  <span className="balance-lbl">Iteration {i + 1}</span>
+                  <span className={`balance-val ${t.profit_loss > 0 ? '' : t.profit_loss < 0 ? 'real' : ''}`}
+                        style={{ color: t.profit_loss > 0 ? 'var(--success)' : t.profit_loss < 0 ? 'var(--danger)' : 'var(--text-faint)' }}>
+                    {t.profit_loss === null || t.profit_loss === undefined
+                      ? 'pending…'
+                      : `${t.profit_loss >= 0 ? '+' : ''}${t.profit_loss.toFixed(2)}`}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <button className="btn btn-danger" onClick={stopSmartTrade} disabled={stopping} style={{ width: '100%', padding: '12px 0', fontWeight: 700 }}>
+              {stopping ? '…' : '■ Stop'}
+            </button>
+          </>
+        )}
       </div>
 
       <div className="page-panel" style={{ maxWidth: 900 }}>
@@ -181,6 +275,7 @@ export default function TradePage() {
         <PriceChart symbol={symbol} />
       </div>
 
+      <div className="section-head"><h2>Manual trade</h2></div>
       <div className="page-panel" style={{ maxWidth: 480 }}>
         <div className="field">
           <label>Account</label>
@@ -210,17 +305,12 @@ export default function TradePage() {
               <option key={key} value={key}>{t.label}{t.verified ? '' : ' (unverified)'}</option>
             ))}
           </select>
-          {!activeType.verified && (
-            <div className="strategy-desc" style={{ color: 'var(--danger)' }}>
-              Not yet confirmed against a real trade. Test with a $1 demo stake first.
-            </div>
-          )}
         </div>
 
         <div className="form-row">
           <div className="field">
             <label>Stake</label>
-            <input type="number" step="0.01" min="0.01" value={stake} onChange={(e) => setStake(e.target.value)} />
+            <input type="number" step="0.01" min="0.01" value={manualStake} onChange={(e) => setManualStake(e.target.value)} />
           </div>
           <div className="field">
             <label>Duration</label>
@@ -235,15 +325,15 @@ export default function TradePage() {
           </div>
         </div>
 
-        {error && <div className="error-banner">{error}</div>}
+        {manualError && <div className="error-banner">{manualError}</div>}
 
         <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
           {activeType.options.map(([direction, label]) => (
             <button
               key={direction}
               className="btn"
-              onClick={() => placeTrade(direction)}
-              disabled={busy}
+              onClick={() => placeManualTrade(direction)}
+              disabled={manualBusy}
               style={{
                 flex: 1,
                 background: direction === 'rise' || direction === 'even' ? 'var(--success)' : 'var(--danger)',
@@ -251,7 +341,7 @@ export default function TradePage() {
                 fontWeight: 700, padding: '14px 0', fontSize: 15,
               }}
             >
-              {busy ? '…' : label}
+              {manualBusy ? '…' : label}
             </button>
           ))}
         </div>
@@ -259,78 +349,15 @@ export default function TradePage() {
         {lastResult && (
           <div className="info-banner" style={{ marginTop: 16 }}>
             Bought {lastResult.direction} on {symbol} — stake {lastResult.buy_price},
-            potential payout {lastResult.payout}. {lastResult.longcode}
+            potential payout {lastResult.payout}.
           </div>
-        )}
-      </div>
-
-      <div className="section-head"><h2>Scan &amp; auto-trade</h2></div>
-      <div className="page-panel">
-        <div className="strategy-desc" style={{ marginBottom: 12 }}>
-          Runs real backtests across every strategy and asset, ranks by measured results — same
-          engine as Auto Scanner. Launches on demo. Uses the stake set above.
-        </div>
-        <div className="form-row" style={{ marginBottom: 10 }}>
-          <div className="field">
-            <label>Stop loss (optional, for launched bots)</label>
-            <input type="number" step="0.01" value={scanStopLoss} onChange={(e) => setScanStopLoss(e.target.value)} />
-          </div>
-          <div className="field">
-            <label>Take profit (optional, for launched bots)</label>
-            <input type="number" step="0.01" value={scanTakeProfit} onChange={(e) => setScanTakeProfit(e.target.value)} />
-          </div>
-        </div>
-        <button className="btn btn-primary" onClick={runScan} disabled={scanning} style={{ width: '100%' }}>
-          {scanning ? 'Scanning…' : 'Scan for the best current combo'}
-        </button>
-
-        {launchMessage && (
-          <div className="info-banner" style={{ marginTop: 12, borderColor: 'var(--success)', color: '#9de8cd' }}>
-            {launchMessage}
-          </div>
-        )}
-
-        {scanResult && (
-          scanResult.top_pick ? (
-            <table className="bt-table" style={{ marginTop: 14 }}>
-              <thead>
-                <tr>
-                  <th>Strategy</th><th>Asset</th><th>Trades</th><th>Win rate</th><th>Net P/L</th><th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {scanResult.ranked.slice(0, 5).map((c) => {
-                  const key = `${c.strategy}-${c.symbol}`
-                  return (
-                    <tr key={key}>
-                      <td>{c.strategy}</td>
-                      <td>{c.symbol}</td>
-                      <td>{c.total_trades}</td>
-                      <td>{(c.win_rate * 100).toFixed(1)}%</td>
-                      <td style={{ color: c.total_profit_loss >= 0 ? 'var(--success)' : 'var(--danger)' }}>
-                        {c.total_profit_loss >= 0 ? '+' : ''}{c.total_profit_loss}
-                      </td>
-                      <td>
-                        <button className="btn btn-ghost" onClick={() => launchCandidate(c)}
-                                disabled={launching !== null} style={{ padding: '5px 10px', fontSize: 11.5 }}>
-                          {launching === key ? '…' : 'Launch'}
-                        </button>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          ) : (
-            <div className="empty-state" style={{ marginTop: 14 }}>{scanResult.note}</div>
-          )
         )}
       </div>
 
       <div className="section-head"><h2>Transaction feed</h2></div>
       {!feed && <div className="spinner-text">Loading…</div>}
       {feed && feed.length === 0 && (
-        <div className="empty-state">No trades yet — place one above or launch a scan result.</div>
+        <div className="empty-state">No trades yet.</div>
       )}
       {feed && feed.length > 0 && (
         <table className="trades">
