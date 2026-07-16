@@ -183,7 +183,7 @@ class DerivClient:
             "currency": self.account_info.get("currency", "USD"),
             "duration": duration,
             "duration_unit": duration_unit,
-            "symbol": symbol,
+            "underlying_symbol": symbol,
         })
         return resp.get("proposal", {})
 
