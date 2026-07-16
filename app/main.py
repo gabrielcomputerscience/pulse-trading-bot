@@ -23,6 +23,7 @@ from app.database import Bot, SessionLocal, Trade, User, decrypt_token, encrypt_
 from app.deriv_client import DerivClient
 from app.deriv_oauth import build_authorize_url, exchange_code_for_token
 from app.market_data import fetch_ticker
+from app.scanner import run_scan
 from app.strategies import RECOMMENDED_STRATEGIES, STRATEGY_REGISTRY
 
 app = FastAPI(title="Pulse Trading Platform API")
@@ -545,3 +546,66 @@ def manual_trade_history(user: User = Depends(get_current_user), db: Session = D
          "opened_at": t.opened_at, "contract_id": t.contract_id}
         for t in trades
     ]
+
+
+# ---------------------------------------------------------------------------
+# Scanner — automated backtesting across strategies/assets, not an AI
+# prediction. See app/scanner.py for the full explanation of what this is
+# and, importantly, what it isn't.
+# ---------------------------------------------------------------------------
+
+class ScanRequest(BaseModel):
+    base_stake: float = 1.0
+    assets: list[str] | None = None
+    lookback_candles: int = 3000
+    assumed_payout_ratio: float = 0.85
+    min_trades: int = 10
+
+
+@app.post("/scanner/run")
+async def scanner_run(req: ScanRequest, user: User = Depends(get_current_user)):
+    """Doesn't need a Deriv token — same as backtesting, this only touches
+    public market data."""
+    return await run_scan(
+        base_stake=req.base_stake, assets=req.assets,
+        lookback_candles=req.lookback_candles,
+        assumed_payout_ratio=req.assumed_payout_ratio,
+        min_trades=req.min_trades,
+    )
+
+
+class ScanLaunchRequest(BaseModel):
+    strategy: str
+    asset: str
+    stake: float = Field(gt=0)
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    max_daily_loss: float | None = None
+
+
+@app.post("/scanner/launch")
+async def scanner_launch(req: ScanLaunchRequest, user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    """Creates a bot from a scan result and starts it immediately on demo —
+    the one-click 'use the winning combo' action. Still subject to the same
+    24h forced demo period as any other bot; nothing here bypasses that."""
+    if req.strategy not in RECOMMENDED_STRATEGIES:
+        raise HTTPException(400, "Scanner only launches recommended (non-high-risk) strategies.")
+
+    bot = Bot(
+        user_id=user.id, name=f"Scanner: {req.strategy} / {req.asset}", strategy=req.strategy,
+        asset=req.asset, stake=req.stake, stop_loss=req.stop_loss, take_profit=req.take_profit,
+        max_daily_loss=req.max_daily_loss, status="stopped", account_mode="demo",
+    )
+    db.add(bot)
+    db.commit()
+    db.refresh(bot)
+
+    bot.demo_started_at = dt.datetime.utcnow()
+    bot.status = "demo_running"
+    db.commit()
+
+    token, account_id = _bot_connection_info(user, "demo")
+    await bot_manager.start_bot(bot, token, account_id)
+
+    return {"bot_id": bot.id, "status": bot.status, "message": "Launched on demo."}
