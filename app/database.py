@@ -81,6 +81,8 @@ class Bot(Base):
     demo_started_at = Column(DateTime, nullable=True)
     managed_by_autopilot = Column(Boolean, default=False)  # autopilot only touches its own bots
     realized_pnl = Column(Float, default=0.0)  # cumulative closed-trade P/L, checked against stop_loss/take_profit
+    last_checked_at = Column(DateTime, nullable=True)  # every candle-close evaluation, whether or not it traded
+    last_signal = Column(String, nullable=True)  # "HOLD" | "BUY" | "SELL" — what the last check found
 
     owner = relationship("User", back_populates="bots")
     trades = relationship("Trade", back_populates="bot", cascade="all, delete-orphan")
@@ -122,6 +124,9 @@ class Trade(Base):
     opened_at = Column(DateTime, default=dt.datetime.utcnow)
     closed_at = Column(DateTime, nullable=True)
     contract_id = Column(String, nullable=True)  # Deriv's contract id, for later status checks
+    duration = Column(Integer, nullable=True)
+    duration_unit = Column(String, nullable=True)  # t | s | m
+    unrealized_pl = Column(Float, nullable=True)  # latest snapshot while the contract is still open
 
     bot = relationship("Bot", back_populates="trades")
 

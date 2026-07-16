@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import PriceChart from './PriceChart.jsx'
 import Toast from './Toast.jsx'
+import TradeCountdown from './TradeCountdown.jsx'
 
 const ASSET_GROUPS = [
   {
@@ -140,13 +141,18 @@ export default function TradePage() {
     return () => clearInterval(id)
   }, [])
 
-  // Poll the active auto-trade bot's own trades for the iteration list
+  // Poll the active auto-trade bot's own trades for the iteration list,
+  // plus its last-checked status so "no entry yet" is visible, not silent.
+  const [lastCheck, setLastCheck] = useState(null)
+
   useEffect(() => {
     if (!activeBot) return
     async function loadIterations() {
       try {
         const trades = await api.botTrades(activeBot.id)
         setIterations(trades.slice().reverse()) // oldest first, so "Iteration 1" reads naturally
+        const status = await api.botStatus(activeBot.id)
+        setLastCheck({ at: status.last_checked_at, signal: status.last_signal })
       } catch (_) { /* retry next poll */ }
     }
     loadIterations()
@@ -179,6 +185,7 @@ export default function TradePage() {
         asset: scan.top_pick.symbol, winRate: scan.top_pick.win_rate,
       })
       setIterations([])
+      setLastCheck(null)
     } catch (err) {
       setScanError(err.message)
     } finally {
@@ -283,9 +290,22 @@ export default function TradePage() {
               </div>
             </div>
 
+            {lastCheck?.at && (
+              <div className="strategy-desc" style={{ marginBottom: 10 }}>
+                Last checked {new Date(lastCheck.at).toLocaleTimeString()} —{' '}
+                {lastCheck.signal === 'HOLD' || !lastCheck.signal
+                  ? 'no entry that check, still watching'
+                  : `signal found (${lastCheck.signal}), trade placed`}
+              </div>
+            )}
+
             <div style={{ margin: '14px 0' }}>
               {iterations.length === 0 && (
-                <div className="empty-state">No trades yet — waiting for a signal. This can take 25-45 minutes.</div>
+                <div className="empty-state">
+                  {lastCheck?.at
+                    ? 'No trades yet — the strategy is watching but hasn\u2019t found a qualifying entry.'
+                    : 'No trades yet — first check happens within about a minute of starting.'}
+                </div>
               )}
               {iterations.map((t, i) => (
                 <div key={t.id} className="balance-row">
@@ -293,7 +313,9 @@ export default function TradePage() {
                   <span className={`balance-val ${t.profit_loss > 0 ? '' : t.profit_loss < 0 ? 'real' : ''}`}
                         style={{ color: t.profit_loss > 0 ? 'var(--success)' : t.profit_loss < 0 ? 'var(--danger)' : 'var(--text-faint)' }}>
                     {t.profit_loss === null || t.profit_loss === undefined
-                      ? 'pending…'
+                      ? (t.unrealized_pl !== null && t.unrealized_pl !== undefined
+                          ? `~${t.unrealized_pl >= 0 ? '+' : ''}${t.unrealized_pl.toFixed(2)} (pending)`
+                          : 'pending…')
                       : `${t.profit_loss >= 0 ? '+' : ''}${t.profit_loss.toFixed(2)}`}
                   </span>
                 </div>
@@ -407,24 +429,37 @@ export default function TradePage() {
               <th>Type</th>
               <th>Stake</th>
               <th>P/L</th>
+              <th>Time left</th>
               <th>Mode</th>
               <th>Opened</th>
             </tr>
           </thead>
           <tbody>
-            {feed.map((t) => (
-              <tr key={t.id}>
-                <td>{t.source}</td>
-                <td>{t.symbol}</td>
-                <td>{t.type}</td>
-                <td>{t.stake}</td>
-                <td className={t.profit_loss > 0 ? 'positive' : t.profit_loss < 0 ? 'negative' : ''}>
-                  {t.profit_loss ?? 'pending'}
-                </td>
-                <td>{t.is_demo ? 'demo' : 'real'}</td>
-                <td>{new Date(t.opened_at).toLocaleString()}</td>
-              </tr>
-            ))}
+            {feed.map((t) => {
+              const resolved = t.profit_loss !== null && t.profit_loss !== undefined
+              const displayPl = resolved ? t.profit_loss : t.unrealized_pl
+              const plClass = displayPl > 0 ? 'positive' : displayPl < 0 ? 'negative' : ''
+              return (
+                <tr key={t.id}>
+                  <td>{t.source}</td>
+                  <td>{t.symbol}</td>
+                  <td>{t.type}</td>
+                  <td>{t.stake}</td>
+                  <td className={plClass}>
+                    {displayPl === null || displayPl === undefined
+                      ? 'pending'
+                      : `${resolved ? '' : '~'}${displayPl >= 0 ? '+' : ''}${displayPl.toFixed(2)}`}
+                  </td>
+                  <td>
+                    {!resolved && (
+                      <TradeCountdown openedAt={t.opened_at} duration={t.duration} durationUnit={t.duration_unit} />
+                    )}
+                  </td>
+                  <td>{t.is_demo ? 'demo' : 'real'}</td>
+                  <td>{new Date(t.opened_at).toLocaleString()}</td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       )}

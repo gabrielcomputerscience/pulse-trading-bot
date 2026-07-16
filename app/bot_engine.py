@@ -147,14 +147,17 @@ class RunningBot:
             return
 
         signal = self.strategy.generate_signal(self.ctx)
+        self._record_check(signal)
         if signal == "HOLD":
             return
 
         stake = self.strategy.next_stake(self.bot_config.stake, self.ctx)
         contract_type = "CALL" if signal == "BUY" else "PUT"
+        duration, duration_unit = 5, "t"  # current default contract length for bot-driven trades
 
         try:
-            prop = await self.client.proposal(self.bot_config.asset, contract_type, stake)
+            prop = await self.client.proposal(self.bot_config.asset, contract_type, stake,
+                                               duration=duration, duration_unit=duration_unit)
             if not prop or "id" not in prop:
                 return
             result = await self.client.buy(prop["id"], float(prop["ask_price"]))
@@ -162,12 +165,29 @@ class RunningBot:
             logger.exception("Trade execution failed for bot %s", self.bot_config.id)
             return
 
-        trade_id = self._record_trade(contract_type, stake, result)
+        trade_id = self._record_trade(contract_type, stake, result, duration, duration_unit)
         contract_id = result.get("contract_id")
         if trade_id and contract_id:
             asyncio.create_task(self._resolve_trade(trade_id, contract_id))
 
-    def _record_trade(self, contract_type: str, stake: float, buy_result: dict) -> int | None:
+    def _record_check(self, signal: str):
+        """Updates last_checked_at/last_signal on every evaluation — even
+        a HOLD — so the frontend can show 'last checked Xs ago, no entry'
+        instead of looking like nothing is happening."""
+        db: Session = self.db_session_factory()
+        try:
+            bot = db.query(Bot).filter(Bot.id == self.bot_config.id).first()
+            if bot:
+                bot.last_checked_at = dt.datetime.utcnow()
+                bot.last_signal = signal
+                db.commit()
+                self.bot_config.last_checked_at = bot.last_checked_at
+                self.bot_config.last_signal = signal
+        finally:
+            db.close()
+
+    def _record_trade(self, contract_type: str, stake: float, buy_result: dict,
+                       duration: int = 5, duration_unit: str = "t") -> int | None:
         db: Session = self.db_session_factory()
         try:
             trade = Trade(
@@ -178,6 +198,8 @@ class RunningBot:
                 entry_price=buy_result.get("buy_price"),
                 is_demo=self.is_forced_demo() or self.bot_config.account_mode == "demo",
                 contract_id=str(buy_result.get("contract_id")) if buy_result.get("contract_id") else None,
+                duration=duration,
+                duration_unit=duration_unit,
             )
             db.add(trade)
             db.commit()
@@ -201,6 +223,18 @@ class RunningBot:
                 continue
 
             if not status.get("is_sold"):
+                # Still open — snapshot the current unrealized P/L so the
+                # frontend can show it live, not just after resolution.
+                current_profit = status.get("profit")
+                if current_profit is not None:
+                    db_snap: Session = self.db_session_factory()
+                    try:
+                        trade = db_snap.query(Trade).filter(Trade.id == trade_id).first()
+                        if trade:
+                            trade.unrealized_pl = current_profit
+                            db_snap.commit()
+                    finally:
+                        db_snap.close()
                 continue
 
             profit_loss = status.get("profit")

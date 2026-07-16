@@ -391,7 +391,9 @@ def list_bots(user: User = Depends(get_current_user), db: Session = Depends(get_
     bots = db.query(Bot).filter(Bot.user_id == user.id).all()
     return [
         {"id": b.id, "name": b.name, "strategy": b.strategy, "asset": b.asset,
-         "status": b.status, "account_mode": b.account_mode}
+         "status": b.status, "account_mode": b.account_mode,
+         "last_checked_at": b.last_checked_at, "last_signal": b.last_signal,
+         "realized_pnl": b.realized_pnl}
         for b in bots
     ]
 
@@ -493,7 +495,9 @@ def bot_trades(bot_id: int, user: User = Depends(get_current_user), db: Session 
     trades = db.query(Trade).filter(Trade.bot_id == bot.id).order_by(Trade.opened_at.desc()).all()
     return [
         {"id": t.id, "symbol": t.symbol, "type": t.trade_type, "stake": t.stake,
-         "profit_loss": t.profit_loss, "is_demo": t.is_demo, "opened_at": t.opened_at}
+         "profit_loss": t.profit_loss, "unrealized_pl": t.unrealized_pl, "is_demo": t.is_demo,
+         "opened_at": t.opened_at, "closed_at": t.closed_at,
+         "duration": t.duration, "duration_unit": t.duration_unit}
         for t in trades
     ]
 
@@ -504,6 +508,8 @@ def bot_status(bot_id: int, user: User = Depends(get_current_user), db: Session 
     return {
         "status": bot.status, "account_mode": bot.account_mode,
         "is_running": bot_manager.is_running(bot.id),
+        "last_checked_at": bot.last_checked_at, "last_signal": bot.last_signal,
+        "realized_pnl": bot.realized_pnl,
     }
 
 
@@ -539,6 +545,16 @@ async def _resolve_manual_trade(token: str, account_id: str, trade_id: int, cont
                 continue
 
             if not status.get("is_sold"):
+                current_profit = status.get("profit")
+                if current_profit is not None:
+                    db_snap = SessionLocal()
+                    try:
+                        trade = db_snap.query(Trade).filter(Trade.id == trade_id).first()
+                        if trade:
+                            trade.unrealized_pl = current_profit
+                            db_snap.commit()
+                    finally:
+                        db_snap.close()
                 continue
 
             profit_loss = status.get("profit")
@@ -630,6 +646,8 @@ async def execute_manual_trade(req: ManualTradeRequest, user: User = Depends(get
         entry_price=buy_result.get("buy_price"),
         is_demo=(req.mode == "demo"),
         contract_id=str(buy_result.get("contract_id")) if buy_result.get("contract_id") else None,
+        duration=req.duration,
+        duration_unit=req.duration_unit,
     )
     db.add(trade)
     db.commit()
@@ -656,8 +674,9 @@ def manual_trade_history(user: User = Depends(get_current_user), db: Session = D
               .all())
     return [
         {"id": t.id, "symbol": t.symbol, "type": t.trade_type, "stake": t.stake,
-         "entry_price": t.entry_price, "profit_loss": t.profit_loss, "is_demo": t.is_demo,
-         "opened_at": t.opened_at, "contract_id": t.contract_id}
+         "entry_price": t.entry_price, "profit_loss": t.profit_loss, "unrealized_pl": t.unrealized_pl,
+         "is_demo": t.is_demo, "opened_at": t.opened_at, "closed_at": t.closed_at,
+         "contract_id": t.contract_id, "duration": t.duration, "duration_unit": t.duration_unit}
         for t in trades
     ]
 
@@ -686,8 +705,9 @@ def transaction_feed(user: User = Depends(get_current_user), db: Session = Depen
     return [
         {
             "id": t.id, "symbol": t.symbol, "type": t.trade_type, "stake": t.stake,
-            "profit_loss": t.profit_loss, "is_demo": t.is_demo,
+            "profit_loss": t.profit_loss, "unrealized_pl": t.unrealized_pl, "is_demo": t.is_demo,
             "opened_at": t.opened_at, "closed_at": t.closed_at,
+            "duration": t.duration, "duration_unit": t.duration_unit,
             "source": bot_names.get(t.bot_id, "Manual") if t.bot_id else "Manual",
         }
         for t in trades
