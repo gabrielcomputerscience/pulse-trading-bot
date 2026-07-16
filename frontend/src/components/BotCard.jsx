@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { api } from '../api.js'
 
 const STATUS_LABELS = {
-  stopped: 'Paused',
+  stopped: 'Stopped',
   demo_running: 'Running · demo',
   real_running: 'Running · real money',
   paused: 'Paused',
@@ -14,15 +14,24 @@ export default function BotCard({ bot, onChanged, onBacktest, onViewTrades }) {
 
   const isRunning = bot.status === 'demo_running' || bot.status === 'real_running'
 
-  async function handleToggle() {
+  async function handleStart() {
     setBusy(true)
     setError('')
     try {
-      if (isRunning) {
-        await api.stopBot(bot.id)
-      } else {
-        await api.startBot(bot.id, false)
-      }
+      await api.startBot(bot.id, false)
+      onChanged()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleStop() {
+    setBusy(true)
+    setError('')
+    try {
+      await api.stopBot(bot.id)
       onChanged()
     } catch (err) {
       setError(err.message)
@@ -41,9 +50,6 @@ export default function BotCard({ bot, onChanged, onBacktest, onViewTrades }) {
             {bot.strategy}
           </span>
         </div>
-        <div className={`toggle ${isRunning ? 'on' : ''} ${busy ? 'busy' : ''}`} onClick={handleToggle}>
-          <div className="knob" />
-        </div>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
@@ -51,9 +57,19 @@ export default function BotCard({ bot, onChanged, onBacktest, onViewTrades }) {
       <div className="status-label">
         <span className={`status-dot status-${bot.status}`} />
         {STATUS_LABELS[bot.status] || bot.status}
+        {bot.account_mode && <span style={{ marginLeft: 6, textTransform: 'uppercase', fontSize: 10.5 }}>· {bot.account_mode}</span>}
       </div>
 
       <div className="bot-actions">
+        {isRunning ? (
+          <button className="btn btn-danger" onClick={handleStop} disabled={busy} style={{ flex: 1 }}>
+            {busy ? '…' : '■ Stop'}
+          </button>
+        ) : (
+          <button className="btn btn-primary" onClick={handleStart} disabled={busy} style={{ flex: 1 }}>
+            {busy ? '…' : '▶ Run'}
+          </button>
+        )}
         <button className="btn btn-ghost" onClick={() => onBacktest(bot)}>Backtest</button>
         <button className="btn btn-ghost" onClick={() => onViewTrades(bot)}>Trades</button>
       </div>

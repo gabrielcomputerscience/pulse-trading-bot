@@ -473,17 +473,34 @@ def bot_status(bot_id: int, user: User = Depends(get_current_user), db: Session 
 class ManualTradeRequest(BaseModel):
     mode: str  # "demo" | "real"
     symbol: str
-    direction: str  # "rise" | "fall"
+    trade_type: str = "rise_fall"  # "rise_fall" | "even_odd"
+    direction: str  # "rise"/"fall" for rise_fall; "even"/"odd" for even_odd
     stake: float = Field(gt=0)
     duration: int = 5
     duration_unit: str = "t"  # t=ticks, s=seconds, m=minutes
 
 
+# Rise/Fall (CALL/PUT) is the only combination confirmed to actually place
+# and resolve a trade correctly on the current API — verified structurally
+# against Deriv's own Playground (message shapes match the older API
+# exactly). Even/Odd (DIGITEVEN/DIGITODD) uses the same message format by
+# the same logic, but hasn't been confirmed with a real executed trade yet.
+# Test with a small demo stake before trusting it.
+_CONTRACT_TYPE_MAP = {
+    ("rise_fall", "rise"): "CALL",
+    ("rise_fall", "fall"): "PUT",
+    ("even_odd", "even"): "DIGITEVEN",
+    ("even_odd", "odd"): "DIGITODD",
+}
+
+
 @app.post("/trading/execute")
 async def execute_manual_trade(req: ManualTradeRequest, user: User = Depends(get_current_user),
                                 db: Session = Depends(get_db)):
-    if req.direction not in ("rise", "fall"):
-        raise HTTPException(400, "direction must be 'rise' or 'fall'")
+    contract_type = _CONTRACT_TYPE_MAP.get((req.trade_type, req.direction))
+    if not contract_type:
+        raise HTTPException(400, f"Unsupported trade_type/direction combination: "
+                                  f"{req.trade_type}/{req.direction}")
     if req.mode not in ("demo", "real"):
         raise HTTPException(400, "mode must be 'demo' or 'real'")
     if req.mode == "real" and settings.deriv_account_mode != "real":
@@ -493,7 +510,6 @@ async def execute_manual_trade(req: ManualTradeRequest, user: User = Depends(get
         )
 
     token, account_id = _bot_connection_info(user, req.mode)
-    contract_type = "CALL" if req.direction == "rise" else "PUT"
 
     client = DerivClient(api_token=token)
     try:

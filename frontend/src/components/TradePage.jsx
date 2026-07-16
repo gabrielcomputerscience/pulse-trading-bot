@@ -11,9 +11,15 @@ const COMMON_ASSETS = [
   { symbol: 'JD25', name: 'Jump 25' },
 ]
 
+const TRADE_TYPES = {
+  rise_fall: { label: 'Rise / Fall', options: [['rise', '▲ Rise'], ['fall', '▼ Fall']], verified: true },
+  even_odd: { label: 'Even / Odd (last digit)', options: [['even', 'Even'], ['odd', 'Odd']], verified: false },
+}
+
 export default function TradePage() {
   const [mode, setMode] = useState('demo')
   const [symbol, setSymbol] = useState('R_75')
+  const [tradeType, setTradeType] = useState('rise_fall')
   const [stake, setStake] = useState(1)
   const [duration, setDuration] = useState(5)
   const [durationUnit, setDurationUnit] = useState('t')
@@ -33,12 +39,14 @@ export default function TradePage() {
 
   useEffect(() => { loadHistory() }, [])
 
+  const activeType = TRADE_TYPES[tradeType]
+
   async function placeTrade(direction) {
     setError('')
     setBusy(true)
     try {
       const res = await api.executeManualTrade({
-        mode, symbol, direction,
+        mode, symbol, trade_type: tradeType, direction,
         stake: parseFloat(stake),
         duration: parseInt(duration, 10),
         duration_unit: durationUnit,
@@ -57,10 +65,10 @@ export default function TradePage() {
       <div className="disclaimer">
         <span>&#9432;</span>
         <span>
-          Instant Rise/Fall trades — no strategy warm-up, executes immediately at the current
-          price. This is manual trading, separate from your automated bots. Only Rise/Fall is
-          available right now; more contract types are coming once verified against Deriv's
-          current API.
+          Instant trades — no strategy warm-up, executes immediately at the current price.
+          This is manual trading, separate from your automated bots. Only <b>Rise/Fall</b> has
+          been confirmed to execute correctly; <b>Even/Odd</b> uses the same message format but
+          hasn't been confirmed with a real trade yet — test it with a small demo stake first.
         </span>
       </div>
 
@@ -80,6 +88,20 @@ export default function TradePage() {
               <option key={a.symbol} value={a.symbol}>{a.name} ({a.symbol})</option>
             ))}
           </select>
+        </div>
+
+        <div className="field">
+          <label>Trade type</label>
+          <select value={tradeType} onChange={(e) => setTradeType(e.target.value)}>
+            {Object.entries(TRADE_TYPES).map(([key, t]) => (
+              <option key={key} value={key}>{t.label}{t.verified ? '' : ' (unverified)'}</option>
+            ))}
+          </select>
+          {!activeType.verified && (
+            <div className="strategy-desc" style={{ color: 'var(--danger)' }}>
+              Not yet confirmed against a real trade. Test with a $1 demo stake first.
+            </div>
+          )}
         </div>
 
         <div className="form-row">
@@ -103,27 +125,27 @@ export default function TradePage() {
         {error && <div className="error-banner">{error}</div>}
 
         <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
-          <button
-            className="btn"
-            onClick={() => placeTrade('rise')}
-            disabled={busy}
-            style={{ flex: 1, background: 'var(--success)', color: '#06231a', fontWeight: 700, padding: '14px 0', fontSize: 15 }}
-          >
-            {busy ? '…' : '▲ Rise'}
-          </button>
-          <button
-            className="btn"
-            onClick={() => placeTrade('fall')}
-            disabled={busy}
-            style={{ flex: 1, background: 'var(--danger)', color: '#2a0a0a', fontWeight: 700, padding: '14px 0', fontSize: 15 }}
-          >
-            {busy ? '…' : '▼ Fall'}
-          </button>
+          {activeType.options.map(([direction, label]) => (
+            <button
+              key={direction}
+              className="btn"
+              onClick={() => placeTrade(direction)}
+              disabled={busy}
+              style={{
+                flex: 1,
+                background: direction === 'rise' || direction === 'even' ? 'var(--success)' : 'var(--danger)',
+                color: direction === 'rise' || direction === 'even' ? '#06231a' : '#2a0a0a',
+                fontWeight: 700, padding: '14px 0', fontSize: 15,
+              }}
+            >
+              {busy ? '…' : label}
+            </button>
+          ))}
         </div>
 
         {lastResult && (
-          <div className="info-banner" style={{ marginTop: 16, borderColor: lastResult.direction === 'rise' ? 'var(--success)' : 'var(--danger)' }}>
-            Bought {lastResult.direction === 'rise' ? 'Rise' : 'Fall'} on {symbol} — stake {lastResult.buy_price},
+          <div className="info-banner" style={{ marginTop: 16 }}>
+            Bought {lastResult.direction} on {symbol} — stake {lastResult.buy_price},
             potential payout {lastResult.payout}. {lastResult.longcode}
           </div>
         )}
