@@ -349,6 +349,59 @@ async def market_history(symbol: str, count: int = 100):
     return candles
 
 
+@app.get("/market/digit-distribution")
+async def digit_distribution(symbol: str, count: int = 2000, decimals: int = 2):
+    """Empirical check: are last digits of real tick prices actually close
+    to uniform (as they should be if the RNG is well-built), or is there
+    measurable skew? Runs a real chi-square goodness-of-fit test against
+    the last `count` real ticks — not a guess, an actual statistical
+    answer. Public endpoint, no token needed, same as ticks_history."""
+    count = max(200, min(count, 5000))
+    client = DerivClient()
+    try:
+        await client.connect()
+        ticks = await client.ticks_history(symbol, count=count, style="ticks")
+    except Exception as e:
+        raise HTTPException(400, f"Failed to fetch ticks for {symbol}: {e}")
+    finally:
+        await client.close()
+
+    if len(ticks) < 100:
+        raise HTTPException(400, f"Not enough tick data returned for {symbol} to test meaningfully.")
+
+    digit_counts = [0] * 10
+    for t in ticks:
+        price_str = f"{float(t['price']):.{decimals}f}"
+        last_digit = int(price_str[-1])
+        digit_counts[last_digit] += 1
+
+    n = len(ticks)
+    expected = n / 10.0
+    chi_square = sum((observed - expected) ** 2 / expected for observed in digit_counts)
+
+    # Chi-square critical values for df=9 (10 digit categories - 1)
+    critical_95 = 16.919
+    critical_99 = 21.666
+    if chi_square < critical_95:
+        verdict = "No statistically significant deviation from uniform at the 95% confidence level — digits look genuinely random, as expected from a well-built RNG."
+    elif chi_square < critical_99:
+        verdict = "Borderline: some deviation from uniform detected (significant at 95% but not 99% confidence). Could be real, could be sampling noise — worth re-testing with a larger sample before trusting it."
+    else:
+        verdict = "Statistically significant deviation from uniform detected (99% confidence). Worth investigating further, but a lone finding like this should still be treated cautiously and re-verified."
+
+    return {
+        "symbol": symbol,
+        "sample_size": n,
+        "digit_counts": digit_counts,
+        "digit_percentages": [round(c / n * 100, 2) for c in digit_counts],
+        "expected_per_digit_pct": 10.0,
+        "chi_square_statistic": round(chi_square, 3),
+        "critical_value_95pct": critical_95,
+        "critical_value_99pct": critical_99,
+        "verdict": verdict,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Bots
 # ---------------------------------------------------------------------------

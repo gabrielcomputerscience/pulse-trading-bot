@@ -69,6 +69,7 @@ export const api = {
 
   marketTicker: () => request('/market/ticker'),
   marketHistory: (symbol, count = 100) => request(`/market/history?symbol=${symbol}&count=${count}`),
+  digitDistribution: (symbol, count = 2000) => request(`/market/digit-distribution?symbol=${symbol}&count=${count}`),
 
   listBots: () => request('/bots'),
   createBot: (bot) => request('/bots', { method: 'POST', body: bot }),
