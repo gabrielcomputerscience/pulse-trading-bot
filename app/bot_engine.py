@@ -51,7 +51,32 @@ class RunningBot:
     async def start(self):
         self.client = DerivClient(api_token=self.api_token)
         await self.client.connect(account_id=self.account_id)
+        await self._seed_history()
         self._task = asyncio.create_task(self._run())
+
+    async def _seed_history(self):
+        """Pulls recent real candles from Deriv on startup instead of
+        waiting for enough live ticks to accumulate — this is what cuts
+        the old 25-45 minute warm-up down to roughly one candle interval
+        (about a minute). Uses the same 1-minute-candle timeframe the
+        backtester measures against, so live behavior still matches what
+        was actually backtested — only the wait is shorter, not the
+        underlying strategy logic."""
+        needed = self.strategy.min_candles + 10  # small buffer above the strict minimum
+        try:
+            raw = await self.client.ticks_history(self.bot_config.asset, count=needed, style="candles")
+        except Exception:
+            logger.exception("Bot %s: history seed failed, falling back to live warm-up", self.bot_config.id)
+            return
+
+        for c in raw:
+            self.ctx.candles.append(Candle(
+                epoch=c["epoch"], open=float(c["open"]), high=float(c["high"]),
+                low=float(c["low"]), close=float(c["close"]),
+            ))
+
+        if len(self.ctx.candles) >= self.strategy.min_candles:
+            await self._on_candle_closed()  # check for an immediate signal using the seeded history
 
     async def stop(self):
         self._stop_requested = True
