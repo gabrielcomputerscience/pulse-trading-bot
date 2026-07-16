@@ -88,7 +88,8 @@ class Trade(Base):
     __tablename__ = "trades"
 
     id = Column(Integer, primary_key=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"), nullable=False)
+    bot_id = Column(Integer, ForeignKey("bots.id"), nullable=True)  # null for manual trades
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # set for manual trades
     symbol = Column(String, nullable=False)
     trade_type = Column(String, nullable=False)  # CALL | PUT
     stake = Column(Float, nullable=False)
@@ -98,6 +99,7 @@ class Trade(Base):
     is_demo = Column(Boolean, default=True)
     opened_at = Column(DateTime, default=dt.datetime.utcnow)
     closed_at = Column(DateTime, nullable=True)
+    contract_id = Column(String, nullable=True)  # Deriv's contract id, for later status checks
 
     bot = relationship("Bot", back_populates="trades")
 

@@ -7,11 +7,13 @@ import OverviewPage from './components/OverviewPage.jsx'
 import MyBotsPage from './components/MyBotsPage.jsx'
 import BotBuilderPage from './components/BotBuilderPage.jsx'
 import BacktestLabPage from './components/BacktestLabPage.jsx'
+import TradePage from './components/TradePage.jsx'
 import BacktestModal from './components/BacktestModal.jsx'
 import TradesModal from './components/TradesModal.jsx'
 import { loadStoredToken, setAuthToken } from './api.js'
 
 const VIEWS = {
+  trade: { title: 'Trade', sub: 'Instant Rise/Fall trades — no strategy, executes immediately' },
   overview: { title: 'Overview', sub: 'Live status across your connected Deriv account and active bots' },
   bots: { title: 'My bots', sub: 'Manage, pause, and inspect every bot on this account' },
   builder: { title: 'Bot builder', sub: 'Configure a strategy, asset, and risk limits' },
@@ -21,7 +23,7 @@ const VIEWS = {
 export default function App() {
   const [screen, setScreen] = useState('login') // login | app
   const [derivLoginid, setDerivLoginid] = useState('')
-  const [view, setView] = useState('overview')
+  const [view, setView] = useState('trade')
   const [refreshKey, setRefreshKey] = useState(0)
   const [backtestBot, setBacktestBot] = useState(null)
   const [tradesBot, setTradesBot] = useState(null)
@@ -85,6 +87,7 @@ export default function App() {
         </div>
 
         <div style={{ padding: '24px 26px 60px' }}>
+          {view === 'trade' && <TradePage />}
           {view === 'overview' && (
             <OverviewPage key={refreshKey} onBacktest={setBacktestBot} onViewTrades={setTradesBot} />
           )}

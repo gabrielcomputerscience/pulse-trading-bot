@@ -454,3 +454,94 @@ def bot_status(bot_id: int, user: User = Depends(get_current_user), db: Session 
         "status": bot.status, "account_mode": bot.account_mode,
         "is_running": bot_manager.is_running(bot.id),
     }
+
+
+# ---------------------------------------------------------------------------
+# Manual / instant trading — separate from the automated strategy bots
+# above. No warm-up period: place a Rise/Fall trade immediately.
+#
+# Only CALL/PUT (Rise/Fall) is offered here. Deriv's older platform
+# supports many more contract types (Higher/Lower, Touch/No Touch,
+# Matches/Differs, Even/Odd, etc.), but this backend has only verified
+# CALL/PUT proposal+buy actually executes correctly on the current API —
+# the message SHAPE matches the old API exactly (confirmed for balance and
+# ticks_history), but proposal/buy specifically haven't been confirmed live
+# yet. Expand this list only after testing each contract_type on demo.
+# ---------------------------------------------------------------------------
+
+class ManualTradeRequest(BaseModel):
+    mode: str  # "demo" | "real"
+    symbol: str
+    direction: str  # "rise" | "fall"
+    stake: float = Field(gt=0)
+    duration: int = 5
+    duration_unit: str = "t"  # t=ticks, s=seconds, m=minutes
+
+
+@app.post("/trading/execute")
+async def execute_manual_trade(req: ManualTradeRequest, user: User = Depends(get_current_user),
+                                db: Session = Depends(get_db)):
+    if req.direction not in ("rise", "fall"):
+        raise HTTPException(400, "direction must be 'rise' or 'fall'")
+    if req.mode not in ("demo", "real"):
+        raise HTTPException(400, "mode must be 'demo' or 'real'")
+    if req.mode == "real" and settings.deriv_account_mode != "real":
+        raise HTTPException(
+            400,
+            "Real-money trading isn't enabled on this deployment (DERIV_ACCOUNT_MODE != 'real')."
+        )
+
+    token, account_id = _bot_connection_info(user, req.mode)
+    contract_type = "CALL" if req.direction == "rise" else "PUT"
+
+    client = DerivClient(api_token=token)
+    try:
+        await client.connect(account_id=account_id)
+        prop = await client.proposal(req.symbol, contract_type, req.stake,
+                                      duration=req.duration, duration_unit=req.duration_unit)
+        if not prop or "id" not in prop:
+            raise HTTPException(400, f"Deriv didn't return a valid quote for {req.symbol}.")
+        buy_result = await client.buy(prop["id"], float(prop["ask_price"]))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Trade failed: {e}")
+    finally:
+        await client.close()
+
+    trade = Trade(
+        bot_id=None,
+        user_id=user.id,
+        symbol=req.symbol,
+        trade_type=contract_type,
+        stake=req.stake,
+        entry_price=buy_result.get("buy_price"),
+        is_demo=(req.mode == "demo"),
+        contract_id=str(buy_result.get("contract_id")) if buy_result.get("contract_id") else None,
+    )
+    db.add(trade)
+    db.commit()
+    db.refresh(trade)
+
+    return {
+        "trade_id": trade.id,
+        "contract_id": buy_result.get("contract_id"),
+        "buy_price": buy_result.get("buy_price"),
+        "payout": buy_result.get("payout"),
+        "longcode": buy_result.get("longcode"),
+    }
+
+
+@app.get("/trading/history")
+def manual_trade_history(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    trades = (db.query(Trade)
+              .filter(Trade.user_id == user.id, Trade.bot_id.is_(None))
+              .order_by(Trade.opened_at.desc())
+              .limit(100)
+              .all())
+    return [
+        {"id": t.id, "symbol": t.symbol, "type": t.trade_type, "stake": t.stake,
+         "entry_price": t.entry_price, "profit_loss": t.profit_loss, "is_demo": t.is_demo,
+         "opened_at": t.opened_at, "contract_id": t.contract_id}
+        for t in trades
+    ]

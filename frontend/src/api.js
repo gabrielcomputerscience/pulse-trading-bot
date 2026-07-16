@@ -78,4 +78,7 @@ export const api = {
   stopBot: (id) => request(`/bots/${id}/stop`, { method: 'POST' }),
   botStatus: (id) => request(`/bots/${id}/status`),
   botTrades: (id) => request(`/bots/${id}/trades`),
+
+  executeManualTrade: (trade) => request('/trading/execute', { method: 'POST', body: trade }),
+  manualTradeHistory: () => request('/trading/history'),
 }
