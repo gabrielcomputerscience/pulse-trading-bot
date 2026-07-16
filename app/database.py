@@ -80,6 +80,7 @@ class Bot(Base):
     created_at = Column(DateTime, default=dt.datetime.utcnow)
     demo_started_at = Column(DateTime, nullable=True)
     managed_by_autopilot = Column(Boolean, default=False)  # autopilot only touches its own bots
+    realized_pnl = Column(Float, default=0.0)  # cumulative closed-trade P/L, checked against stop_loss/take_profit
 
     owner = relationship("User", back_populates="bots")
     trades = relationship("Trade", back_populates="bot", cascade="all, delete-orphan")

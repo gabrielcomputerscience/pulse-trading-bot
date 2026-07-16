@@ -1,14 +1,43 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import PriceChart from './PriceChart.jsx'
 
-const COMMON_ASSETS = [
-  { symbol: 'R_75', name: 'Volatility 75' },
-  { symbol: 'R_100', name: 'Volatility 100' },
-  { symbol: 'R_50', name: 'Volatility 50' },
-  { symbol: 'BOOM1000', name: 'Boom 1000' },
-  { symbol: 'CRASH1000', name: 'Crash 1000' },
-  { symbol: 'stpRNG', name: 'Step Index' },
-  { symbol: 'JD25', name: 'Jump 25' },
+// Only synthetic indices we've actually tested end to end — deliberately
+// not including forex/stock indices, which have market hours and other
+// behavior we haven't verified against this backend.
+const ASSET_GROUPS = [
+  {
+    label: 'Volatility indices',
+    assets: [
+      { symbol: 'R_10', name: 'Volatility 10' },
+      { symbol: 'R_25', name: 'Volatility 25' },
+      { symbol: 'R_50', name: 'Volatility 50' },
+      { symbol: 'R_75', name: 'Volatility 75' },
+      { symbol: 'R_100', name: 'Volatility 100' },
+    ],
+  },
+  {
+    label: 'Boom / Crash',
+    assets: [
+      { symbol: 'BOOM1000', name: 'Boom 1000' },
+      { symbol: 'CRASH1000', name: 'Crash 1000' },
+    ],
+  },
+  {
+    label: 'Jump indices',
+    assets: [
+      { symbol: 'JD10', name: 'Jump 10' },
+      { symbol: 'JD25', name: 'Jump 25' },
+      { symbol: 'JD50', name: 'Jump 50' },
+      { symbol: 'JD75', name: 'Jump 75' },
+    ],
+  },
+  {
+    label: 'Step indices',
+    assets: [
+      { symbol: 'stpRNG', name: 'Step Index' },
+    ],
+  },
 ]
 
 const TRADE_TYPES = {
@@ -72,6 +101,13 @@ export default function TradePage() {
         </span>
       </div>
 
+      <div className="page-panel" style={{ maxWidth: 900 }}>
+        <div className="section-head" style={{ marginBottom: 12 }}>
+          <h2>{symbol}</h2>
+        </div>
+        <PriceChart symbol={symbol} />
+      </div>
+
       <div className="page-panel" style={{ maxWidth: 480 }}>
         <div className="field">
           <label>Account</label>
@@ -84,8 +120,12 @@ export default function TradePage() {
         <div className="field">
           <label>Asset</label>
           <select value={symbol} onChange={(e) => setSymbol(e.target.value)}>
-            {COMMON_ASSETS.map((a) => (
-              <option key={a.symbol} value={a.symbol}>{a.name} ({a.symbol})</option>
+            {ASSET_GROUPS.map((group) => (
+              <optgroup key={group.label} label={group.label}>
+                {group.assets.map((a) => (
+                  <option key={a.symbol} value={a.symbol}>{a.name} ({a.symbol})</option>
+                ))}
+              </optgroup>
             ))}
           </select>
         </div>

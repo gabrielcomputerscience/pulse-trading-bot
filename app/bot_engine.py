@@ -112,6 +112,14 @@ class RunningBot:
         if self.bot_config.max_daily_loss and self.daily_pnl <= -abs(self.bot_config.max_daily_loss):
             logger.warning("Bot %s hit max daily loss, halting for today", self.bot_config.id)
             return
+        if self.bot_config.stop_loss and self.bot_config.realized_pnl <= -abs(self.bot_config.stop_loss):
+            logger.warning("Bot %s hit stop loss, stopping", self.bot_config.id)
+            await self._auto_stop("stop_loss")
+            return
+        if self.bot_config.take_profit and self.bot_config.realized_pnl >= self.bot_config.take_profit:
+            logger.info("Bot %s hit take profit, stopping", self.bot_config.id)
+            await self._auto_stop("take_profit")
+            return
 
         signal = self.strategy.generate_signal(self.ctx)
         if signal == "HOLD":
@@ -129,9 +137,12 @@ class RunningBot:
             logger.exception("Trade execution failed for bot %s", self.bot_config.id)
             return
 
-        self._record_trade(contract_type, stake, result)
+        trade_id = self._record_trade(contract_type, stake, result)
+        contract_id = result.get("contract_id")
+        if trade_id and contract_id:
+            asyncio.create_task(self._resolve_trade(trade_id, contract_id))
 
-    def _record_trade(self, contract_type: str, stake: float, buy_result: dict):
+    def _record_trade(self, contract_type: str, stake: float, buy_result: dict) -> int | None:
         db: Session = self.db_session_factory()
         try:
             trade = Trade(
@@ -141,16 +152,84 @@ class RunningBot:
                 stake=stake,
                 entry_price=buy_result.get("buy_price"),
                 is_demo=self.is_forced_demo() or self.bot_config.account_mode == "demo",
+                contract_id=str(buy_result.get("contract_id")) if buy_result.get("contract_id") else None,
             )
             db.add(trade)
             db.commit()
+            db.refresh(trade)
+            return trade.id
         finally:
             db.close()
-        # NOTE: resolving win/loss and calling strategy.on_trade_closed() /
-        # updating daily_pnl happens on contract expiry, via a separate
-        # subscription to `proposal_open_contract` keyed off buy_result["contract_id"].
-        # Omitted here for brevity but follows the same _send()/subscribe
-        # pattern already established in DerivClient.
+
+    async def _resolve_trade(self, trade_id: int, contract_id: int,
+                              poll_interval: float = 3.0, max_attempts: int = 200):
+        """Polls the contract until Deriv marks it sold, then records the
+        real outcome and checks stop-loss/take-profit. Not yet confirmed
+        against a real trade the way balance/ticks_history were — this is
+        the piece most worth watching closely on your first live bot run."""
+        for _ in range(max_attempts):
+            await asyncio.sleep(poll_interval)
+            try:
+                status = await self.client.check_open_contract(contract_id)
+            except Exception:
+                logger.exception("Failed checking contract %s for bot %s", contract_id, self.bot_config.id)
+                continue
+
+            if not status.get("is_sold"):
+                continue
+
+            profit_loss = status.get("profit")
+            if profit_loss is None:
+                sell_price = status.get("sell_price")
+                buy_price = status.get("buy_price")
+                if sell_price is not None and buy_price is not None:
+                    profit_loss = float(sell_price) - float(buy_price)
+
+            db: Session = self.db_session_factory()
+            try:
+                trade = db.query(Trade).filter(Trade.id == trade_id).first()
+                if trade:
+                    trade.profit_loss = profit_loss
+                    trade.exit_price = status.get("sell_price")
+                    trade.closed_at = dt.datetime.utcnow()
+                    db.commit()
+            finally:
+                db.close()
+
+            if profit_loss is not None:
+                won = profit_loss > 0
+                self.strategy.on_trade_closed(self.ctx, won=won, profit_loss=profit_loss)
+                self.daily_pnl += profit_loss
+
+                db2: Session = self.db_session_factory()
+                try:
+                    bot = db2.query(Bot).filter(Bot.id == self.bot_config.id).first()
+                    if bot:
+                        bot.realized_pnl = (bot.realized_pnl or 0.0) + profit_loss
+                        db2.commit()
+                        self.bot_config.realized_pnl = bot.realized_pnl
+                finally:
+                    db2.close()
+            return
+
+        logger.warning("Contract %s for bot %s never resolved after %d attempts",
+                        contract_id, self.bot_config.id, max_attempts)
+
+    async def _auto_stop(self, reason: str):
+        self._stop_requested = True
+        if self._task:
+            self._task.cancel()
+        if self.client:
+            await self.client.close()
+        db: Session = self.db_session_factory()
+        try:
+            bot = db.query(Bot).filter(Bot.id == self.bot_config.id).first()
+            if bot:
+                bot.status = "stopped"
+                db.commit()
+        finally:
+            db.close()
+        logger.info("Bot %s auto-stopped: %s", self.bot_config.id, reason)
 
     def _reset_daily_pnl_if_new_day(self):
         today = dt.date.today()

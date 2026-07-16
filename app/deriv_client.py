@@ -195,6 +195,15 @@ class DerivClient:
         resp = await self._send({"sell": contract_id, "price": price})
         return resp.get("sell", {})
 
+    async def check_open_contract(self, contract_id: int) -> dict:
+        """One-shot check on a contract's current status. Once resolved,
+        the response includes is_sold=1 and a final profit figure. Same
+        message shape as the pre-migration API — not yet confirmed with a
+        real trade the way balance/ticks_history were, so treat results
+        here with the same caution until verified live."""
+        resp = await self._send({"proposal_open_contract": 1, "contract_id": contract_id})
+        return resp.get("proposal_open_contract", {})
+
     async def balance(self) -> dict:
         resp = await self._send({"balance": 1})
         return resp.get("balance", {})

@@ -333,6 +333,22 @@ async def market_ticker():
     ]
 
 
+@app.get("/market/history")
+async def market_history(symbol: str, count: int = 100):
+    """Recent candles for a single symbol, for charting. Public — no token
+    needed, same as the ticker and backtesting."""
+    count = max(10, min(count, 1000))
+    client = DerivClient()
+    try:
+        await client.connect()
+        candles = await client.ticks_history(symbol, count=count, style="candles")
+    except Exception as e:
+        raise HTTPException(400, f"Failed to fetch history for {symbol}: {e}")
+    finally:
+        await client.close()
+    return candles
+
+
 # ---------------------------------------------------------------------------
 # Bots
 # ---------------------------------------------------------------------------

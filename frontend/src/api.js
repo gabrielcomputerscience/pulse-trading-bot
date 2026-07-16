@@ -68,6 +68,7 @@ export const api = {
   martingaleInfo: () => request('/strategies/martingale'),
 
   marketTicker: () => request('/market/ticker'),
+  marketHistory: (symbol, count = 100) => request(`/market/history?symbol=${symbol}&count=${count}`),
 
   listBots: () => request('/bots'),
   createBot: (bot) => request('/bots', { method: 'POST', body: bot }),
