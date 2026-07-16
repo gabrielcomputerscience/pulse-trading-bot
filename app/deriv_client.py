@@ -175,6 +175,9 @@ class DerivClient:
 
     async def proposal(self, symbol: str, contract_type: str, stake: float,
                         duration: int = 5, duration_unit: str = "t") -> dict:
+        """Field name confirmed live via Deriv's Playground: it's
+        underlying_symbol now, not symbol — everything else in this
+        message matched the older API's shape exactly."""
         resp = await self._send({
             "proposal": 1,
             "amount": stake,

@@ -82,6 +82,7 @@ export const api = {
 
   executeManualTrade: (trade) => request('/trading/execute', { method: 'POST', body: trade }),
   manualTradeHistory: () => request('/trading/history'),
+  transactionFeed: () => request('/trading/feed'),
 
   runScan: (params) => request('/scanner/run', { method: 'POST', body: params }),
   launchScanResult: (params) => request('/scanner/launch', { method: 'POST', body: params }),

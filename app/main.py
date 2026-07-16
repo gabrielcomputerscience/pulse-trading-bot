@@ -614,6 +614,38 @@ def manual_trade_history(user: User = Depends(get_current_user), db: Session = D
     ]
 
 
+@app.get("/trading/feed")
+def transaction_feed(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Every trade this user has made — manual and bot-driven — in one
+    stream, most recent first. Used for the live transaction feed and
+    win/loss pop-ups on the Trade page, so you don't have to check two
+    different places."""
+    from sqlalchemy import or_
+
+    bot_ids = [b.id for b in db.query(Bot.id).filter(Bot.user_id == user.id).all()]
+
+    conditions = [Trade.user_id == user.id]
+    if bot_ids:
+        conditions.append(Trade.bot_id.in_(bot_ids))
+
+    trades = (db.query(Trade)
+              .filter(or_(*conditions))
+              .order_by(Trade.opened_at.desc())
+              .limit(100)
+              .all())
+    bot_names = {b.id: b.name for b in db.query(Bot).filter(Bot.id.in_(bot_ids)).all()} if bot_ids else {}
+
+    return [
+        {
+            "id": t.id, "symbol": t.symbol, "type": t.trade_type, "stake": t.stake,
+            "profit_loss": t.profit_loss, "is_demo": t.is_demo,
+            "opened_at": t.opened_at, "closed_at": t.closed_at,
+            "source": bot_names.get(t.bot_id, "Manual") if t.bot_id else "Manual",
+        }
+        for t in trades
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Scanner — automated backtesting across strategies/assets, not an AI
 # prediction. See app/scanner.py for the full explanation of what this is
