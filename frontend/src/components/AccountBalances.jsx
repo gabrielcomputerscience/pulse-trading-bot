@@ -3,6 +3,11 @@ import { api } from '../api.js'
 
 const REFRESH_MS = 30000
 
+function formatBalance(raw) {
+  const num = parseFloat(raw)
+  return Number.isFinite(num) ? num.toFixed(2) : '—'
+}
+
 export default function AccountBalances() {
   const [balances, setBalances] = useState(null)
   const [error, setError] = useState('')
@@ -32,7 +37,7 @@ export default function AccountBalances() {
         <div className="balance-row">
           <span className="balance-lbl">Demo</span>
           <span className="balance-val">
-            {balances.demo.error ? '—' : `${balances.demo.balance?.toFixed(2)} ${balances.demo.currency}`}
+            {balances.demo.error ? '—' : `${formatBalance(balances.demo.balance)} ${balances.demo.currency}`}
           </span>
         </div>
       )}
@@ -40,7 +45,7 @@ export default function AccountBalances() {
         <div className="balance-row">
           <span className="balance-lbl">Real</span>
           <span className="balance-val real">
-            {balances.real.error ? '—' : `${balances.real.balance?.toFixed(2)} ${balances.real.currency}`}
+            {balances.real.error ? '—' : `${formatBalance(balances.real.balance)} ${balances.real.currency}`}
           </span>
         </div>
       )}
