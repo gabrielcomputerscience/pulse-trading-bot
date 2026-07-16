@@ -84,4 +84,8 @@ export const api = {
 
   runScan: (params) => request('/scanner/run', { method: 'POST', body: params }),
   launchScanResult: (params) => request('/scanner/launch', { method: 'POST', body: params }),
+
+  autopilotStatus: () => request('/autopilot/status'),
+  autopilotStart: (config) => request('/autopilot/start', { method: 'POST', body: config }),
+  autopilotStop: () => request('/autopilot/stop', { method: 'POST' }),
 }

@@ -7,6 +7,8 @@ returned in any response, never logged, and this file never writes it to
 disk anywhere other than the encrypted DB column.
 """
 import datetime as dt
+import logging
+import asyncio
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +21,9 @@ from app.auth import (create_access_token, create_access_token_for_user,
 from app.backtest import run_backtest
 from app.bot_engine import BotManager
 from app.config import settings
-from app.database import Bot, SessionLocal, Trade, User, decrypt_token, encrypt_token, get_db, init_db
+from app.autopilot import evaluate_and_reconcile
+from app.database import (AutopilotConfig, Bot, SessionLocal, Trade, User, decrypt_token,
+                           encrypt_token, get_db, init_db)
 from app.deriv_client import DerivClient
 from app.deriv_oauth import build_authorize_url, exchange_code_for_token
 from app.market_data import fetch_ticker
@@ -41,10 +45,40 @@ app.add_middleware(
 
 bot_manager = BotManager(db_session_factory=SessionLocal)
 
+_AUTOPILOT_POLL_SECONDS = 60  # how often the loop checks whether anyone's due for a re-scan
+
+
+async def _autopilot_loop():
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                configs = db.query(AutopilotConfig).filter(AutopilotConfig.enabled.is_(True)).all()
+                now = dt.datetime.utcnow()
+                for config in configs:
+                    due = (config.last_run_at is None or
+                           (now - config.last_run_at).total_seconds() >= config.scan_interval_minutes * 60)
+                    if not due:
+                        continue
+                    user = db.query(User).filter(User.id == config.user_id).first()
+                    if not user or not user.deriv_bearer_token_encrypted:
+                        continue
+                    try:
+                        await evaluate_and_reconcile(db, user, config, bot_manager, _bot_connection_info)
+                    except Exception:
+                        logging.getLogger("autopilot").exception(
+                            "Autopilot cycle failed for user %s", user.id)
+            finally:
+                db.close()
+        except Exception:
+            logging.getLogger("autopilot").exception("Autopilot loop iteration failed")
+        await asyncio.sleep(_AUTOPILOT_POLL_SECONDS)
+
 
 @app.on_event("startup")
 def on_startup():
     init_db()
+    asyncio.create_task(_autopilot_loop())
 
 
 # ---------------------------------------------------------------------------
@@ -625,3 +659,105 @@ async def scanner_launch(req: ScanLaunchRequest, user: User = Depends(get_curren
     await bot_manager.start_bot(bot, token, account_id)
 
     return {"bot_id": bot.id, "status": bot.status, "message": "Launched on demo."}
+
+
+# ---------------------------------------------------------------------------
+# Autopilot — set it once, it scans on a schedule and manages its own bots.
+# Demo-only, hardcoded, not a settable option — see app/autopilot.py.
+# ---------------------------------------------------------------------------
+
+class AutopilotConfigRequest(BaseModel):
+    min_win_rate: float = 0.6
+    min_trades: int = 15
+    base_stake: float = 1.0
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    max_daily_loss: float | None = None
+    scan_interval_minutes: int = 360
+    lookback_candles: int = 3000
+
+
+def _serialize_autopilot_config(config: AutopilotConfig) -> dict:
+    return {
+        "enabled": config.enabled,
+        "min_win_rate": config.min_win_rate,
+        "min_trades": config.min_trades,
+        "base_stake": config.base_stake,
+        "stop_loss": config.stop_loss,
+        "take_profit": config.take_profit,
+        "max_daily_loss": config.max_daily_loss,
+        "scan_interval_minutes": config.scan_interval_minutes,
+        "lookback_candles": config.lookback_candles,
+        "last_run_at": config.last_run_at,
+        "last_result_summary": config.last_result_summary,
+    }
+
+
+def _get_or_create_config(user: User, db: Session) -> AutopilotConfig:
+    config = db.query(AutopilotConfig).filter(AutopilotConfig.user_id == user.id).first()
+    if not config:
+        config = AutopilotConfig(user_id=user.id)
+        db.add(config)
+        db.commit()
+        db.refresh(config)
+    return config
+
+
+@app.get("/autopilot/status")
+def autopilot_status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    config = _get_or_create_config(user, db)
+    managed = (db.query(Bot)
+               .filter(Bot.user_id == user.id, Bot.managed_by_autopilot.is_(True))
+               .all())
+    return {
+        "config": _serialize_autopilot_config(config),
+        "managed_bots": [
+            {"id": b.id, "name": b.name, "strategy": b.strategy, "asset": b.asset, "status": b.status}
+            for b in managed
+        ],
+    }
+
+
+@app.post("/autopilot/start")
+async def autopilot_start(req: AutopilotConfigRequest, user: User = Depends(get_current_user),
+                           db: Session = Depends(get_db)):
+    """Saves the config, enables it, and runs one cycle immediately so you
+    see results right away — the background loop keeps it going from here
+    on its own schedule."""
+    if not user.deriv_bearer_token_encrypted:
+        raise HTTPException(400, "Connect your Deriv account first.")
+
+    config = _get_or_create_config(user, db)
+    config.enabled = True
+    config.min_win_rate = req.min_win_rate
+    config.min_trades = req.min_trades
+    config.base_stake = req.base_stake
+    config.stop_loss = req.stop_loss
+    config.take_profit = req.take_profit
+    config.max_daily_loss = req.max_daily_loss
+    config.scan_interval_minutes = req.scan_interval_minutes
+    config.lookback_candles = req.lookback_candles
+    db.commit()
+
+    result = await evaluate_and_reconcile(db, user, config, bot_manager, _bot_connection_info)
+    return {"config": _serialize_autopilot_config(config), "first_run": result}
+
+
+@app.post("/autopilot/stop")
+async def autopilot_stop(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Disables autopilot and stops every bot it's currently managing.
+    Bots you created manually are never touched by this."""
+    config = _get_or_create_config(user, db)
+    config.enabled = False
+    db.commit()
+
+    managed = (db.query(Bot)
+               .filter(Bot.user_id == user.id, Bot.managed_by_autopilot.is_(True),
+                       Bot.status.in_(["demo_running", "real_running"]))
+               .all())
+    for bot in managed:
+        await bot_manager.stop_bot(bot.id)
+        bot.status = "stopped"
+    db.commit()
+
+    return {"stopped_count": len(managed)}

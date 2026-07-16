@@ -79,9 +79,30 @@ class Bot(Base):
     account_mode = Column(String, default="demo")
     created_at = Column(DateTime, default=dt.datetime.utcnow)
     demo_started_at = Column(DateTime, nullable=True)
+    managed_by_autopilot = Column(Boolean, default=False)  # autopilot only touches its own bots
 
     owner = relationship("User", back_populates="bots")
     trades = relationship("Trade", back_populates="bot", cascade="all, delete-orphan")
+
+
+class AutopilotConfig(Base):
+    __tablename__ = "autopilot_configs"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    enabled = Column(Boolean, default=False)
+    min_win_rate = Column(Float, default=0.6)     # e.g. 0.6 = require 60%+ measured win rate
+    min_trades = Column(Integer, default=15)      # ignore combos with too few trades to trust
+    base_stake = Column(Float, default=1.0)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    max_daily_loss = Column(Float, nullable=True)
+    scan_interval_minutes = Column(Integer, default=360)  # re-scan every 6h by default
+    lookback_candles = Column(Integer, default=3000)
+    last_run_at = Column(DateTime, nullable=True)
+    last_result_summary = Column(String, nullable=True)  # short human-readable summary of last run
+
+    owner = relationship("User")
 
 
 class Trade(Base):

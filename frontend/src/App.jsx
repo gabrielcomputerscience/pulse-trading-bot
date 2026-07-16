@@ -9,12 +9,14 @@ import BotBuilderPage from './components/BotBuilderPage.jsx'
 import BacktestLabPage from './components/BacktestLabPage.jsx'
 import TradePage from './components/TradePage.jsx'
 import ScannerPage from './components/ScannerPage.jsx'
+import AutopilotPage from './components/AutopilotPage.jsx'
 import BacktestModal from './components/BacktestModal.jsx'
 import TradesModal from './components/TradesModal.jsx'
 import { loadStoredToken, setAuthToken } from './api.js'
 
 const VIEWS = {
   trade: { title: 'Trade', sub: 'Instant Rise/Fall trades — no strategy, executes immediately' },
+  autopilot: { title: 'Autopilot', sub: 'Set it once — scans, launches, and manages winning combos automatically on demo' },
   scanner: { title: 'Auto scanner', sub: 'Backtests every strategy across multiple assets and ranks the results' },
   overview: { title: 'Overview', sub: 'Live status across your connected Deriv account and active bots' },
   bots: { title: 'My bots', sub: 'Manage, pause, and inspect every bot on this account' },
@@ -90,6 +92,7 @@ export default function App() {
 
         <div style={{ padding: '24px 26px 60px' }}>
           {view === 'trade' && <TradePage />}
+          {view === 'autopilot' && <AutopilotPage />}
           {view === 'scanner' && <ScannerPage />}
           {view === 'overview' && (
             <OverviewPage key={refreshKey} onBacktest={setBacktestBot} onViewTrades={setTradesBot} />
