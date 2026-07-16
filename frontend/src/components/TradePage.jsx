@@ -45,6 +45,7 @@ const TRADE_TYPES = {
 
 const FEED_POLL_MS = 6000
 const ITERATION_POLL_MS = 5000
+const ACTIVE_BOT_STORAGE_KEY = 'pulse_active_smart_trade_bot'
 
 export default function TradePage() {
   const [symbol, setSymbol] = useState('R_75')
@@ -55,9 +56,45 @@ export default function TradePage() {
   const [takeProfit, setTakeProfit] = useState('')
   const [scanning, setScanning] = useState(false)
   const [scanError, setScanError] = useState('')
-  const [activeBot, setActiveBot] = useState(null) // { id, strategy, asset, winRate }
+  const [activeBot, setActiveBotRaw] = useState(() => {
+    try {
+      const saved = localStorage.getItem(ACTIVE_BOT_STORAGE_KEY)
+      return saved ? JSON.parse(saved) : null
+    } catch (_) {
+      return null
+    }
+  })
   const [iterations, setIterations] = useState([])
   const [stopping, setStopping] = useState(false)
+  const [restoring, setRestoring] = useState(true)
+
+  function setActiveBot(bot) {
+    setActiveBotRaw(bot)
+    if (bot) localStorage.setItem(ACTIVE_BOT_STORAGE_KEY, JSON.stringify(bot))
+    else localStorage.removeItem(ACTIVE_BOT_STORAGE_KEY)
+  }
+
+  // On mount (including after navigating back to this page), verify the
+  // saved active bot is actually still running server-side — the bot
+  // itself never stopped just because you left the page, but if you (or
+  // its stop-loss/take-profit) stopped it while you were elsewhere, clear
+  // the stale reference here.
+  useEffect(() => {
+    async function verify() {
+      if (activeBot) {
+        try {
+          const status = await api.botStatus(activeBot.id)
+          if (status.status !== 'demo_running' && status.status !== 'real_running') {
+            setActiveBot(null)
+          }
+        } catch (_) {
+          setActiveBot(null)
+        }
+      }
+      setRestoring(false)
+    }
+    verify()
+  }, [])
 
   // Manual trade — secondary, simple panel
   const [mode, setMode] = useState('demo')
@@ -206,7 +243,9 @@ export default function TradePage() {
           )}
         </div>
 
-        {!activeBot ? (
+        {restoring ? (
+          <div className="spinner-text">Checking for a running trade…</div>
+        ) : !activeBot ? (
           <>
             <div className="form-row">
               <div className="field">
